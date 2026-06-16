@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ips-uu"
+version = "0.1.0"
+description = "iPS-UU IPSW inspection and signed restore utility framework"
+requires-python = ">=3.10"
+readme = "README.md"
+authors = [{ name = "iPS-UU contributors" }]
+license = { text = "Research/educational use; see repository documentation" }
+keywords = ["ios", "ipsw", "restore", "firmware", "diagnostics", "libimobiledevice"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: MacOS X",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: System :: Hardware",
+    "Topic :: Utilities",
+]
+
+[project.optional-dependencies]
+gui = ["PySide6>=6.7", "pyinstaller>=6.0"]
+
+[project.scripts]
+ips-uu = "ips_uu.cli:main"
+restorectl = "ips_uu.restorectl:main"
+restore-research = "ips_uu.restore_research:main"
+ips-uu-gui = "ips_uu.gui.app:main"
+
+[tool.setuptools.packages.find]
+include = ["ips_uu*"]

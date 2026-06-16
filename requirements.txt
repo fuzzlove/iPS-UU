@@ -1,0 +1,5 @@
+# Core iPS-UU runtime requirements.
+#
+# The CLI/core package currently uses the Python standard library only.
+# Install the local package in editable mode for development:
+-e .

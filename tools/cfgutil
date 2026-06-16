@@ -1,0 +1,8 @@
+#!/bin/sh
+CFGUTIL="/Applications/Apple Configurator.app/Contents/MacOS/cfgutil"
+if [ ! -x "$CFGUTIL" ]; then
+  echo "error: Apple Configurator cfgutil was not found at $CFGUTIL" >&2
+  echo "Install Apple Configurator from Apple, then retry." >&2
+  exit 127
+fi
+exec "$CFGUTIL" "$@"

@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-label="iPS-UU monochrome icon">
+  <rect x="64" y="64" width="896" height="896" rx="214" fill="#f7f8fa"/>
+  <path d="M851 403C790 216 610 113 424 160" fill="none" stroke="#1f2937" stroke-width="42" stroke-linecap="round"/>
+  <path d="M433 133l-16 79 75-29z" fill="#1f2937"/>
+  <path d="M179 643c62 184 241 286 424 241" fill="none" stroke="#6b7280" stroke-width="38" stroke-linecap="round"/>
+  <path d="M596 891l18-79-76 27z" fill="#6b7280"/>
+  <rect x="268" y="279" width="488" height="488" rx="74" fill="#242933"/>
+  <rect x="323" y="334" width="378" height="378" rx="34" fill="#303745" stroke="#9ca3af" stroke-width="10"/>
+  <g stroke="#7b8492" stroke-width="18" stroke-linecap="round">
+    <path d="M268 372h-54M268 438h-54M268 504h-54M268 570h-54M268 636h-54"/>
+    <path d="M756 372h54M756 438h54M756 504h54M756 570h54M756 636h54"/>
+    <path d="M372 279v-54M438 279v-54M504 279v-54M570 279v-54M636 279v-54"/>
+    <path d="M372 767v54M438 767v54M504 767v54M570 767v54M636 767v54"/>
+  </g>
+  <rect x="364" y="197" width="296" height="630" rx="62" fill="#e5e7eb" stroke="#ffffff" stroke-width="8"/>
+  <rect x="397" y="256" width="230" height="508" rx="32" fill="#111827"/>
+  <rect x="462" y="223" width="100" height="12" rx="6" fill="#6b7280"/>
+  <circle cx="512" cy="793" r="14" fill="#f9fafb" stroke="#6b7280" stroke-width="4"/>
+  <path d="M451 520h74c20 0 36-16 36-36v-68" fill="none" stroke="#f3f4f6" stroke-width="20" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M532 406l29-30 30 30" fill="none" stroke="#f3f4f6" stroke-width="20" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="430" y="560" width="164" height="96" rx="18" fill="#4b5563"/>
+  <rect x="459" y="589" width="106" height="38" rx="9" fill="#f3f4f6"/>
+</svg>

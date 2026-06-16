@@ -1,0 +1,27 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+*.log
+*.ipsw
+
+# Local reverse-engineering inputs and generated audit dumps.
+Contents/
+ContentsAS/
+ContentsPR/
+DCSD/
+AtlasCore2
+installcoordination_host_test_runner
+Frameworks/
+decompiled*/
+/cfgutil
+idevicerestore-*/
+turdus_m3rula_*/
+*.app/
+Purple*.app/
+FakeTunes.app/
+*.ipa

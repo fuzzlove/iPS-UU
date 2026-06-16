@@ -1,0 +1,2 @@
+# Development/test requirements for this repository.
+-r requirements-gui.txt

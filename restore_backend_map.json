@@ -1,0 +1,164 @@
+{
+  "generated_by": "restore-research",
+  "policy": {
+    "supports_unsigned_firmware": false,
+    "supports_security_bypass": false,
+    "private_api_execution": false,
+    "execution_backends": [
+      "apple_configurator_cfgutil",
+      "idevicerestore"
+    ]
+  },
+  "candidate_backends": [
+    {
+      "id": "apple_configurator_cfgutil",
+      "path": "/Applications/Apple Configurator.app/Contents/MacOS/cfgutil",
+      "purpose": "Apple Configurator command-line restore/update/revive surface.",
+      "callable_from_userland": true,
+      "permissions_or_entitlements_required": [
+        "Runs as userland CLI.",
+        "Requires normal device access and Apple restore eligibility.",
+        "Activation Lock, device lock state, internet access, and signing validation still apply."
+      ],
+      "stability_risk": "medium",
+      "execution_supported": true,
+      "evidence_source": [
+        "/Applications/Apple Configurator.app/Contents/Resources/cfgutil.1 documents restore|update [-I path to IPSW], --ecid selection, --format JSON, and --progress.",
+        "cfgutil strings include restore, update, revive, custom IPSW path handling, restore options, restore policy, and firmware build lookup."
+      ]
+    },
+    {
+      "id": "apple_configurator_app",
+      "path": "/Applications/Apple Configurator.app",
+      "purpose": "Apple GUI restore/update workflow and Automator actions.",
+      "callable_from_userland": "GUI only; not selected as automation backend.",
+      "permissions_or_entitlements_required": [
+        "Apple-signed app with bundled/private frameworks.",
+        "Uses internal controllers/XPC services not exposed as stable CLI API."
+      ],
+      "stability_risk": "medium",
+      "execution_supported": false,
+      "evidence_source": [
+        "Info.plist imports com.apple.iTunes.ipsw.",
+        "Bundle contains Restore Devices.action.",
+        "Strings include restoreDevice:, installFirmwareWithURLs:targetedItems:, RestoreOptionsAssistant, AuthInstallRestoreBehavior, and com.apple.MobileDevice.MobileRestore."
+      ]
+    },
+    {
+      "id": "mobiledevice_framework",
+      "path": "/System/Library/PrivateFrameworks/MobileDevice.framework/MobileDevice",
+      "purpose": "Private MobileDevice/AuthInstall restore, TSS, personalization, DFU, and service APIs.",
+      "callable_from_userland": "Private framework; inventory only.",
+      "permissions_or_entitlements_required": [
+        "Private ABI and unstable contracts.",
+        "Some paths appear to require privileged USB support, XPC services, or Apple-internal clients."
+      ],
+      "stability_risk": "high",
+      "execution_supported": false,
+      "evidence_source": [
+        "nm/strings show AMAuthInstall* TSS request APIs, AMRestore/restorable symbols, APNonce/SepNonce strings, and restore service names."
+      ]
+    },
+    {
+      "id": "devicerecoveryd",
+      "path": "/System/Library/LaunchDaemons/com.apple.devicerecoveryd.plist",
+      "purpose": "LaunchDaemon for DeviceRecovery Mach services.",
+      "callable_from_userland": "No documented restore CLI contract found locally.",
+      "permissions_or_entitlements_required": [
+        "Launchd-managed service.",
+        "Expected clients/protocols are private."
+      ],
+      "stability_risk": "high",
+      "execution_supported": false,
+      "evidence_source": [
+        "LaunchDaemon exposes com.apple.DeviceRecoveryEnvironmentService, com.apple.DeviceRecoveryOverrideService, and com.apple.DeviceRecoveryService."
+      ]
+    },
+    {
+      "id": "mobile_softwareupdated",
+      "path": "/System/Library/LaunchDaemons/com.apple.mobile.softwareupdated.plist",
+      "purpose": "Mobile software update daemon.",
+      "callable_from_userland": "No documented direct restore CLI contract found locally.",
+      "permissions_or_entitlements_required": [
+        "Runs as _softwareupdate through launchd."
+      ],
+      "stability_risk": "high",
+      "execution_supported": false,
+      "evidence_source": [
+        "LaunchDaemon exposes com.apple.mobile.softwareupdated."
+      ]
+    },
+    {
+      "id": "libimobiledevice_comparison_tools",
+      "path": {
+        "ideviceinfo": "PATH lookup at runtime",
+        "irecovery": "PATH lookup at runtime",
+        "idevicerestore": "PATH lookup at runtime"
+      },
+      "purpose": "Open-source comparison tools for device metadata and restore execution.",
+      "callable_from_userland": true,
+      "permissions_or_entitlements_required": [
+        "Normal USB/device access."
+      ],
+      "stability_risk": "low",
+      "execution_supported": "idevicerestore is fallback/comparison only; cfgutil is preferred when available.",
+      "evidence_source": [
+        "Existing restorectl uses ideviceinfo and irecovery for dry-run device mode/identifier detection."
+      ]
+    },
+    {
+      "id": "local_internal_restore_tools",
+      "path": {
+        "mobile_restore": "PATH lookup at runtime",
+        "prestore": "PATH lookup at runtime",
+        "factory_purple_restore": "PATH lookup at runtime",
+        "factory_demo_restore": "PATH lookup at runtime",
+        "goldrestore": "PATH lookup at runtime",
+        "goldrestore2": "PATH lookup at runtime"
+      },
+      "purpose": "Factory/internal restore-style tools found on some systems.",
+      "callable_from_userland": "Not supported here.",
+      "permissions_or_entitlements_required": [
+        "Unknown; may require factory environment, internal credentials, entitlements, or specific device states."
+      ],
+      "stability_risk": "critical",
+      "execution_supported": false,
+      "evidence_source": [
+        "Local PATH inventory only; not reversed into an executor."
+      ]
+    }
+  ],
+  "safe_workflow_map": {
+    "device_detection": [
+      "Use ideviceinfo -x for normal mode when available.",
+      "Use irecovery -q for recovery/DFU metadata when available.",
+      "Use cfgutil list or cfgutil --ecid as the Apple Configurator equivalent for selection."
+    ],
+    "ipsw_validation": [
+      "Open IPSW as zip archive.",
+      "Read BuildManifest.plist.",
+      "Report ProductVersion, ProductBuildVersion, SupportedProductTypes, and selected BuildIdentity.",
+      "Refuse execution on ProductType mismatch."
+    ],
+    "signing_tss_check": [
+      "No local signing forge/replay.",
+      "Dry-run reports signing as not locally verified.",
+      "Execution delegates signing/APTicket/APNonce/SEP/baseband validation to cfgutil or idevicerestore and stops on failure."
+    ],
+    "erase_update_decision": [
+      "restore means erase install.",
+      "update means data-preserving update where backend and device state support it.",
+      "cfgutil documentation states recovery-mode restore/update erases the device."
+    ],
+    "restore_handoff": [
+      "Preferred: cfgutil --format JSON --progress restore|update -I <ipsw>.",
+      "Fallback/comparison: idevicerestore -e <ipsw> for erase, or idevicerestore <ipsw> for non-erase update-style handoff.",
+      "No direct MobileDevice/AuthInstall private API calls."
+    ],
+    "progress_error_reporting": [
+      "cfgutil JSON/progress output is preferred.",
+      "idevicerestore stdout/stderr is fallback.",
+      "Validation failures are terminal."
+    ]
+  }
+}
