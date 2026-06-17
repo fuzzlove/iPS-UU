@@ -1,14 +1,11 @@
-"""Passive palera1n workflow documentation and preflight.
-
-This service treats palera1n as an external user-managed dependency. It never
-executes, automates, launches, wraps, or simplifies jailbreak actions.
-"""
+"""palera1n workflow documentation, preflight, and explicit terminal launch."""
 
 from __future__ import annotations
 
 import json
 import os
 import platform
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -123,6 +120,45 @@ def run_rootless_version_check(timeout: int = 5) -> dict[str, Any]:
         "succeeded": completed.returncode == 0,
         "safety": {"device_action": False, "jailbreak_action": False, "metadata_only": True},
     }
+
+
+def build_rootless_launch_plan() -> dict[str, Any]:
+    toolchain = find_toolchain()
+    metadata = (toolchain.get("tool") or {}).get("metadata") or {}
+    path = Path(str(metadata.get("path") or "tools/palera1n"))
+    command = [str(path), "-l"]
+    return {
+        "backend": "palera1n",
+        "workflow": "rootless_default_launch",
+        "command": command,
+        "command_preview": shlex.join(command),
+        "terminal": "Terminal.app" if platform.system() == "Darwin" else "system terminal",
+        "requires_user_terminal": True,
+        "toolchain": toolchain,
+    }
+
+
+def launch_rootless_in_terminal() -> dict[str, Any]:
+    plan = build_rootless_launch_plan()
+    command = list(plan["command"])
+    path = Path(command[0])
+    if not path.exists():
+        raise Palera1nError("palera1n was not found at tools/palera1n.")
+    if not os.access(path, os.X_OK):
+        raise Palera1nError("palera1n exists but is not executable.")
+    display_command = shlex.join(command)
+    if platform.system() == "Darwin":
+        script = f'tell application "Terminal" to do script {json.dumps(display_command)}'
+        completed = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, check=False)
+        return {
+            **plan,
+            "launcher": ["osascript", "-e", script],
+            "returncode": completed.returncode,
+            "stdout": completed.stdout,
+            "stderr": completed.stderr,
+            "succeeded": completed.returncode == 0,
+        }
+    raise Palera1nError("Opening palera1n in a new terminal is currently implemented for macOS Terminal.app.")
 
 
 def inspect_device() -> dict[str, Any]:

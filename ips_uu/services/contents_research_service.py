@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import plistlib
 import shutil
+import sys
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -13,7 +14,18 @@ from urllib.parse import quote
 from ips_uu.services.tool_resolver import resolve_cfgutil, resolve_idevicerestore
 
 
-DEFAULT_CONTENTS_ROOT = Path("Contents")
+REPO_ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[2]))
+
+
+def default_contents_root() -> Path:
+    """Return the local reverse-engineering bundle root when present."""
+    for candidate in (REPO_ROOT / "Contents", REPO_ROOT / "rengineer"):
+        if candidate.exists():
+            return candidate
+    return REPO_ROOT / "Contents"
+
+
+DEFAULT_CONTENTS_ROOT = default_contents_root()
 
 BUNDLED_COMPONENTS: list[dict[str, str]] = [
     {"id": "main_app", "path": "MacOS/3uTools", "purpose": "Qt desktop restore/flash front end"},
@@ -28,6 +40,74 @@ BUNDLED_COMPONENTS: list[dict[str, str]] = [
     {"id": "libdownload", "path": "Frameworks/libdownload.dylib", "purpose": "Download/task support library"},
     {"id": "libidm", "path": "Frameworks/libidm.1.0.0.dylib", "purpose": "Device management, backup, and app restore support library"},
 ]
+
+RESTORE_ENGINE_FINDINGS: list[dict[str, Any]] = [
+    {
+        "id": "bundled_libidevicerestore_signed_pipeline",
+        "component": "Frameworks/libidevicerestore.dylib",
+        "finding": "The bundled restore engine follows the normal idevicerestore pipeline: IPSW parsing, BuildManifest identity selection, nonce collection, Apple TSS request, component personalization, recovery/restore mode handoff, and filesystem streaming.",
+        "evidence": [
+            "_idevicerestore_start",
+            "_ipsw_extract_build_manifest",
+            "_build_manifest_check_compatibility",
+            "_get_tss_response",
+            "_tss_request_send",
+            "_restore_send_root_ticket",
+            "https://gs.apple.com/TSS/controller?action=2",
+        ],
+        "ips_uu_integration": "Use as architecture guidance and optional inventory only; execute supported signed restores through cfgutil or a known idevicerestore CLI.",
+        "guardrail": "No offline unsigned restore, TSS bypass, forged ticket, SEP/baseband bypass, or continued restore after missing/invalid tickets.",
+    },
+    {
+        "id": "itunesflash_mobiledevice_wrapper",
+        "component": "MacOS/iTunesFlash",
+        "finding": "The helper dynamically loads Apple's private MobileDevice.framework, waits for a matching ECID, creates default restore options, sets RestoreBundlePath and AuthInstallRestoreBehavior, then calls AMRestorableDeviceRestore.",
+        "evidence": [
+            "AMRestorableDeviceRegisterForNotifications",
+            "AMRestorableDeviceRestore",
+            "AMRestoreCreateDefaultOptions",
+            "AMRestorableDeviceGetECID",
+            "RestoreBundlePath",
+            "AuthInstallRestoreBehavior",
+            "Update",
+            "Erase",
+        ],
+        "ips_uu_integration": "Document the call flow and mirror the user-facing distinction between update and erase, but do not call private MobileDevice restore APIs.",
+        "guardrail": "Private MobileDevice/AuthInstall execution remains blocked in iPS-UU.",
+    },
+]
+
+ITUNES_FLASH_HELPER_MODEL: dict[str, Any] = {
+    "component": "MacOS/iTunesFlash",
+    "classification": "private_mobiledevice_restore_wrapper_documented_only",
+    "argc": 6,
+    "arguments": [
+        {"index": 1, "name": "save_user_data_flag", "parser": "atoi", "effect": "0 selects Erase; nonzero selects Update"},
+        {"index": 2, "name": "ecid", "parser": "sscanf %llx", "effect": "Only restore the matching restorable device ECID; 0 behaves as wildcard in observed logic."},
+        {"index": 3, "name": "restore_bundle_path", "parser": "string", "effect": "Assigned to RestoreBundlePath."},
+        {"index": 4, "name": "mobiledevice_log_path", "parser": "string", "effect": "Passed to AMRestoreEnableFileLogging."},
+        {"index": 5, "name": "callback_error_path", "parser": "string", "effect": "Receives restore callback failure code/description."},
+    ],
+    "option_dictionary": {
+        "RestoreBundlePath": "argv[3]",
+        "AuthInstallRestoreBehavior": "Update or Erase",
+        "iTunesVersion": "iTunes 12.9.5.5",
+        "UserLocale": "Zh_cn",
+    },
+    "private_symbols": [
+        "AMRestorableDeviceRegisterForNotifications",
+        "AMRestorableDeviceRestore",
+        "AMRestoreCreateDefaultOptions",
+        "AMRestorableDeviceGetECID",
+        "AMRestoreEnableFileLogging",
+        "AMDSetLogLevel",
+    ],
+    "ips_uu_policy": {
+        "execute_helper": False,
+        "private_api_execution_supported": False,
+        "useful_for": ["progress model", "update-vs-erase labeling", "log/callback surface design"],
+    },
+}
 
 PYTHON_IMPLEMENTATION_MAP: list[dict[str, Any]] = [
     {
@@ -188,9 +268,16 @@ def _external_tool_inventory() -> list[dict[str, Any]]:
     return tools
 
 
-def contents_requirements(root: Path | str = DEFAULT_CONTENTS_ROOT, methods: list[dict[str, Any]] | None = None) -> dict[str, Any]:
-    """Return a safe requirements map derived from the local Contents audit."""
-    root_path = Path(root)
+def contents_requirements(root: Path | str | None = None, methods: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """Return a safe requirements map derived from the local reverse-engineering audit."""
+    if root is None:
+        root_path = DEFAULT_CONTENTS_ROOT
+    else:
+        root_path = Path(root)
+        if not root_path.is_absolute():
+            root_path = REPO_ROOT / root_path
+        if not root_path.exists() and root_path.name == "Contents" and DEFAULT_CONTENTS_ROOT.exists():
+            root_path = DEFAULT_CONTENTS_ROOT
     components = _component_inventory(root_path)
     implemented = [item for item in PYTHON_IMPLEMENTATION_MAP if str(item["status"]).startswith("implemented")]
     blocked = [item for item in PYTHON_IMPLEMENTATION_MAP if item["status"] == "blocked"]
@@ -198,8 +285,11 @@ def contents_requirements(root: Path | str = DEFAULT_CONTENTS_ROOT, methods: lis
         "generated_by": "iPS-UU contents research",
         "contents_root": str(root_path),
         "contents_present": root_path.exists(),
+        "research_report": str(root_path / "REVERSE_ENGINEERING_REPORT.md") if (root_path / "REVERSE_ENGINEERING_REPORT.md").exists() else None,
         "bundle_info": _read_info_plist(root_path),
         "bundled_components": components,
+        "restore_engine_findings": RESTORE_ENGINE_FINDINGS,
+        "itunes_flash_helper_model": ITUNES_FLASH_HELPER_MODEL,
         "release_requirements": RELEASE_REQUIREMENTS,
         "external_tools": _external_tool_inventory(),
         "python_implementation_map": PYTHON_IMPLEMENTATION_MAP,

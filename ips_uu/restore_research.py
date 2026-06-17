@@ -19,7 +19,7 @@ from typing import Any
 from .banner import print_intro
 from .planner import PlannerError, choose_identity, downgrade_assessment, load_build_manifest, supported_product_types
 from .restorectl import DeviceSnapshot, compatibility_report, detect_device, manifest_summary
-from .services.contents_research_service import contents_requirements, signed_firmware_lookup
+from .services.contents_research_service import DEFAULT_CONTENTS_ROOT, contents_requirements, signed_firmware_lookup
 from .services.dependency_setup_service import dependency_setup
 from .services.shsh_blob_service import inspect_blob
 from .services.tool_resolver import cfgutil_available, resolve_cfgutil, idevicerestore_available, resolve_idevicerestore
@@ -31,7 +31,7 @@ APPLE_CONFIGURATOR = Path("/Applications/Apple Configurator.app")
 MOBILEDEVICE = Path("/System/Library/PrivateFrameworks/MobileDevice.framework/MobileDevice")
 DEVICERECOVERYD_PLIST = Path("/System/Library/LaunchDaemons/com.apple.devicerecoveryd.plist")
 MOBILE_SOFTWAREUPDATED_PLIST = Path("/System/Library/LaunchDaemons/com.apple.mobile.softwareupdated.plist")
-CONTENTS_ROOT = Path("Contents")
+CONTENTS_ROOT = DEFAULT_CONTENTS_ROOT
 CONTENTS_LIBIDEVICERESTORE = CONTENTS_ROOT / "Frameworks/libidevicerestore.dylib"
 CONTENTS_ITUNES_FLASH = CONTENTS_ROOT / "MacOS/iTunesFlash"
 
@@ -761,8 +761,8 @@ def method_run_command(args: argparse.Namespace) -> int:
     return completed.returncode
 
 
-def requirements_command(_args: argparse.Namespace) -> int:
-    print(json.dumps(contents_requirements(CONTENTS_ROOT, CONTENTS_RESTORE_METHODS), indent=2, sort_keys=True))
+def requirements_command(args: argparse.Namespace) -> int:
+    print(json.dumps(contents_requirements(args.root, CONTENTS_RESTORE_METHODS), indent=2, sort_keys=True))
     return 0
 
 
@@ -833,7 +833,8 @@ notes:
     method_run.add_argument("--i-understand-this-may-wipe-data", action="store_true", help="Required with --execute")
     method_run.set_defaults(func=method_run_command)
 
-    reqs = subcommands.add_parser("requirements", help="Print safe implementation requirements derived from Contents")
+    reqs = subcommands.add_parser("requirements", help="Print safe implementation requirements derived from the local reverse-engineering bundle")
+    reqs.add_argument("--root", default=str(CONTENTS_ROOT), help="Reverse-engineering bundle root, defaulting to Contents or rengineer when present")
     reqs.set_defaults(func=requirements_command)
 
     signed = subcommands.add_parser("signed-firmwares", help="Query public signed firmware metadata for a ProductType")

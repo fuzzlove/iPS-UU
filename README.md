@@ -1,6 +1,12 @@
 # iPS-UU
 
-iPS-UU is a Python framework for IPSW inspection and lawful Apple-signed restore research. It preserves CLI workflows while adding an optional desktop GUI for dry-run restore preflight.
+iPS-UU is a professional device servicing and research interface for iOS restore, recovery, signed downgrade analysis, app install, firmware inspection, and detailed device statistics.
+
+One professional workspace for iOS servicing and research.
+
+Users are responsible for their device, data, warranty status, carrier obligations, and compliance with local law.
+
+iPS-UU is a wrapper workspace. Bundled open-source tools remain external backends; the app discovers them, shows status/version/path/license hints, builds explicit command plans, streams output, exports logs, and explains practical risks. It focuses on firmware flashing, recovery, diagnostics, and uncommon device details rather than jailbreak or boot workflows.
 
 ## Desktop GUI
 
@@ -22,18 +28,23 @@ or:
 python3 -m ips_uu gui
 ```
 
-The GUI includes Dashboard, Device / Target, iOS Device Viewer, Firmware / IPSW, Restore Research / Dry Run, Restore Methods, External Tools, palera1n, Turdus Merula, Contents Requirements, Logs, Settings, and About views. It keeps execution disabled by default and uses the existing core restore research logic for dry-run planning.
+The GUI includes Dashboard, Connected Device, Firmware / IPSW, Restore Options, Restore, Signing Simulator, Purple Restore, Downgrade, Apps / Install, Logs, Tools, Settings, and About views. The Restore tab exposes a confirmation-gated `Force Signed Flash` action that first builds a backend command plan, shows the exact command or blocker, and then runs only supported signed restore backends.
+
+The sidebar motto is `Professional IPSW matters.`
 
 ### Screenshots
 
 Placeholders for first release screenshots:
 
 - `docs/screenshots/dashboard.png`
-- `docs/screenshots/ios-device-viewer.png`
+- `docs/screenshots/connected-device.png`
 - `docs/screenshots/firmware-ipsw.png`
-- `docs/screenshots/restore-dry-run.png`
-- `docs/screenshots/external-tools.png`
-- `docs/screenshots/palera1n.png`
+- `docs/screenshots/restore-options.png`
+- `docs/screenshots/restore.png`
+- `docs/screenshots/signing-simulator.png`
+- `docs/screenshots/downgrade.png`
+- `docs/screenshots/apps-install.png`
+- `docs/screenshots/tools.png`
 - `docs/screenshots/logs.png`
 
 ## CLI
@@ -46,10 +57,11 @@ restore-research --help
 restorectl --help
 ```
 
-Research the local `Contents` bundle requirements:
+Research the local reverse-engineering bundle requirements. The command uses `Contents/` when present and falls back to `rengineer/`, including the new `iTunesFlash`/`libidevicerestore` findings as non-executable guardrails:
 
 ```sh
 restore-research requirements
+restore-research requirements --root rengineer
 restore-research methods
 ```
 
@@ -110,86 +122,198 @@ The `iOS Device Viewer` GUI tab is a clean-room connected-device panel. It uses 
 - `idevice_id` for USB device listing.
 - `ideviceinfo` for user-authorized device metadata.
 - `idevicepair validate` for passive pairing/trust status.
+- `idevicediagnostics`, `ideviceenterrecovery`, and `irecovery` for confirmed device actions and recovery-state checks.
+- `idevicescreenshot` for an actual trusted-device screen preview when the device and host allow capture.
 
-It shows connected devices, a clean static device visual, masked UDIDs, device name, model name, serial number, logic board identifiers when exposed, ECID, model ID, firmware version, IMEI, Wi-Fi address, Bluetooth address, device storage/free space, connection status, pairing/trust status, and troubleshooting guidance. If metadata access fails because the device is locked or untrusted, the viewer prompts the user to unlock the device and tap `Trust This Computer`.
+It shows connected devices, a clean static device visual, masked UDIDs, device name, model name, serial number, logic board identifiers when exposed, ECID, model ID, firmware version, hardware model, board/chip/die identifiers, device class, CPU architecture, activation state, baseband version and serial, region/color, battery state, IMEI/MEID, Wi-Fi address, Bluetooth address, device storage/free space, metadata domains queried, bundled tool status, connection status, pairing/trust status, and troubleshooting guidance. If metadata access fails because the device is locked or untrusted, the viewer prompts the user to unlock the device and tap `Trust This Computer`.
 
-The device visual is drawn from scratch by iPS-UU and reflects metadata/status only. Live screen preview remains a placeholder and requires a supported, user-authorized capture backend; iPS-UU does not use private Apple APIs, exploit paths, jailbreak-only methods, or copied third-party behavior.
+The Connected Device tab includes confirmed controls for shutdown, restart, enter recovery mode, exit recovery mode, and DFU instructions. DFU remains a physical button sequence; the app shows model-family instructions and then verifies state through the bundled tools. The screen preview uses `idevicescreenshot` and falls back to clear status text if the device is locked, untrusted, in a non-capturable mode, or the backend refuses capture.
+
+For fuller fingerprinting, the release bundles the libimobiledevice utilities in `tools/`:
+
+- `idevice_id`
+- `ideviceinfo`
+- `idevicepair`
+- `idevicediagnostics`
+- `ideviceenterrecovery`
+- `irecovery`
+- `ideviceinstaller`
+- `idevicescreenshot`
+
+The PyInstaller spec bundles these tools into the app. The release checker reports any missing tools so the packaged app does not silently lose device metadata or app-install support.
+
+Bundled macOS Mach-O tools must be universal2 builds containing both `arm64` and `x86_64` slices so the release works on Apple Silicon and Intel Macs. Script wrappers such as `tools/cfgutil` are allowed when they delegate to host-installed tools. Run this audit before packaging:
+
+```sh
+python3 scripts/audit_tool_architectures.py
+```
+
+If a tool reports `missing arm64` or `missing x86_64`, replace it with a universal2 build or combine matching per-architecture builds with `lipo -create ... -output tools/<name>`.
+
+When you have separate arm64 and x86_64 tool folders, stage the universal2 copies with:
+
+```sh
+./scripts/stage_universal_tools.sh /path/to/arm64-tools /path/to/x86_64-tools
+```
+
+The staging helper currently covers the libimobiledevice, libirecovery, ideviceinstaller, and idevicerestore command-line tools that must run natively on both Apple Silicon and Intel Macs.
+
+`tools/idevicerestore` may be a small wrapper. In that layout it expects `tools/idevicerestore.arm64` on Apple Silicon and `tools/idevicerestore.x86_64` on Intel, and it prints a clear setup error when the native binary is missing instead of allowing macOS to fail with `bad CPU type in executable`.
+
+The device visual is drawn from scratch by iPS-UU and reflects metadata/status only. Live screen preview uses supported, user-authorized capture tooling when available and otherwise falls back to clear status text; iPS-UU does not use private Apple APIs or copied third-party behavior.
 
 Clean-room limits:
 
 - No code, binaries, resources, or private implementation details are copied from 3uTools.
-- No jailbreak, exploit, restore, or privilege-escalation workflow is executed.
+- No jailbreak, exploit, or privilege-escalation workflow is exposed.
 - Subprocess calls use explicit argument arrays, timeouts, captured output, and friendly GUI errors.
 - Diagnostics mask device UDIDs except the last 6 characters.
 - Restart, shutdown, enter recovery, and exit recovery controls use public libimobiledevice/irecovery commands only and require explicit confirmation.
 
 ## External Tools
 
-The `External Tools` GUI tab inventories optional local tooling without launching it. If `tools/palera1n` is present, iPS-UU reports:
+The `Tools` GUI tab inventories bundled and PATH-discoverable open-source tooling. Supported backend families include:
+
+- `idevicerestore`
+- `ideviceinstaller`
+- libimobiledevice utilities such as `idevice_id`, `ideviceinfo`, `idevicepair`, `ideviceenterrecovery`, and `irecovery`
+- future open-source restore, recovery, flashing, diagnostics, and app-install tools
+
+For each tool, iPS-UU reports:
 
 - Installed or missing status.
+- Path.
+- Executable status.
 - Passive version output when available.
-- File permissions and executable bit.
-- SHA-256 hash.
-- `file` metadata.
-- macOS `codesign` information when available.
-- Static device compatibility notes based on connected-device ProductType.
+- Purpose.
+- Supported workflows.
+- Required device mode.
+- Supported device families.
+- Open-source license hint or bundled LICENSE/COPYING text when available.
+- Diagnostics.
+- Tool folder access.
 
-iPS-UU treats palera1n as an external dependency only. It does not execute, automate, launch, wrap, simplify, or expose jailbreak actions, and it does not provide one-click jailbreak functionality.
+The `Backend Inspector` mode reads open-source source files included in the repository and documents entry points, CLI arguments, supported devices, required files, output/error patterns, environment requirements, and workflow phases. It does not decompile closed-source binaries.
 
-## palera1n
+## Restore Options
 
-The `palera1n` GUI tab is a documentation-only workflow wrapper modeled after the iOS Guide running-palera1n instructions:
+The `Restore Options` tab, labeled internally as NovaCerts Restore Options, helps users understand legitimate restore, recovery, reinstall, and downgrade paths without bypassing Apple signing.
 
-- Detects `tools/palera1n` and passive metadata.
-- Detects the connected device and shows static A11-and-earlier/iOS 15+ compatibility guidance.
-- Shows guide-derived caveats for USB cables, Apple Silicon USB-C behavior, A9(X)/pongoOS retry behavior, and A11 passcode/SEP limitations.
-- Includes a `rootless` button that runs only `palera1n --version` as a passive metadata check.
-- Includes an interactive terminal-style pane with allowlisted commands only: `help`, `clear`, `version`, `rootless`, `status`, and `guide`.
-- Requires acknowledgement that any palera1n command must be run outside iPS-UU.
-- Saves a guidance plan and preflight log without generating or executing a palera1n command.
+It shows current device status:
 
-iPS-UU never launches palera1n, enters DFU, jailbreaks, or modifies the connected device from this tab.
+- ProductType.
+- Model.
+- Chip family.
+- Current iOS version.
+- Mode: normal, recovery, or DFU.
+- ECID if available.
 
-## Turdus Merula
+It evaluates available restore paths:
 
-The `Turdus Merula` GUI tab is a polished workflow wrapper for the bundled `tools/turdus_merula` and `tools/turdusra1n` toolchain.
+- Update to latest signed iOS.
+- Restore latest signed iOS.
+- Reinstall the same version only if that version is currently signed.
+- Downgrade only if the selected target firmware is currently signed.
 
-What it does:
+The firmware checker lets the user select an IPSW, parses `BuildManifest.plist`, checks device compatibility, checks public signing metadata when available, and reports one of these statuses: `Installable`, `Not installable`, `Unsupported device`, or `Signature unavailable`.
 
-- Detects the bundled Turdus Merula tools and reports versions when available.
-- Repairs executable permissions on bundled Turdus Merula files only.
-- Detects connected device mode and maps known A9(X), A10, and A10X ProductTypes.
-- Parses IPSW `BuildManifest.plist` and checks ProductType compatibility.
-- Shows a manual prerequisite checklist: connect device, complete the required external prerequisite outside the app, return to iPS-UU, refresh device state, and continue only after verification.
-- Shows tethered restore warnings, DFU/recovery readiness, disk space, and data-loss acknowledgement checks.
-- Validates optional user-supplied artifact paths, such as SHSH/blob/manifest files, for existence only.
-- Generates a dry-run workflow plan and session log under the iPS-UU log directory.
+Reverse-engineering findings from the local `rengineer/` payload are integrated as documentation and safety policy. iPS-UU records that the bundled `libidevicerestore.dylib` follows a normal signed restore/TSS pipeline and that `MacOS/iTunesFlash` is a private `MobileDevice.framework` wrapper around `AMRestorableDeviceRestore`; neither becomes an unsigned downgrade or private API execution backend.
 
-Limits:
+Restore-without-updating guidance is explicit: reinstalling the current iOS is a standard restore option only while that exact version remains signed; otherwise a standard restore normally moves to currently signed firmware. A device settings reset may erase user data but is not a firmware reinstall. Recovery restore normally requires signed firmware.
 
-- iPS-UU does not modify or reimplement Turdus Merula internals.
-- iPS-UU does not execute, wrap, automate, hide, or simplify pwnDFU, exploit, or Turdus Merula commands from the GUI.
-- iPS-UU does not parse, submit, patch, replay, or generate SHSH/blob material.
-- Tethered restores require this computer/tool to boot the device every time.
-- Some iOS 10 cellular A10X/iPhone 7 class restores may fail activation due to baseband compatibility.
+External restore backend support is shown transparently: tool name, supported device families, backend-defined iOS support notes, risks, command preview, dry-run availability, and log location.
 
-Tool placement:
+## Signing Simulator
 
-- Preferred current layout: `tools/turdus_merula` and `tools/turdusra1n`.
-- Folder layout also works if the binaries are placed in `tools/turdus_merula/`.
+The `Signing Simulator` tab is a local-only mock signing service for UI tests, demos, screenshots, and workflow-state testing. It displays this banner:
 
-Troubleshooting:
+```text
+Simulation mode only. This does not contact Apple, does not generate valid SHSH/APTickets, and cannot authorize a real restore.
+```
 
-- Missing dependency: confirm the binaries are in `tools/` and use `Refresh Tools`.
-- Permission issue: use `Repair Permissions` in the Turdus Merula tab.
-- DFU/recovery not detected: complete the required external prerequisite outside iPS-UU, then click `Refresh Device Mode`.
-- Failed compatibility: confirm the IPSW supports the detected ProductType.
+The simulator can produce JSON states such as approved, rejected, tethered-only, expired, and network error. Approved mock responses are accepted by the GUI as `restore_allowed_in_simulation_only` so the restore/flash workflow can move forward for UI testing, screenshots, demos, and application logic tests. Every response includes `simulation: true`, `ticket_type: mock`, and `valid_for_real_restore: false`.
 
-Dry-run sessions write `preflight.json`, `restore_plan.json`, `command_preview.txt`, `stdout.log`, `stderr.log`, and `summary.txt` under the iPS-UU logs folder, with a temp-folder fallback when the home log directory is not writable. Turdus Merula session summaries log `Waiting for device in required mode` instead of launching prerequisite tooling.
+The local mock API is available only when explicitly started with `--simulation`:
+
+```sh
+python3 -m ips_uu.services.mock_tss_service --simulation --host 127.0.0.1 --port 8765
+```
+
+Endpoints:
+
+- `POST /mock-tss/request`
+- `GET /mock-tss/status/<request_id>`
+- `POST /mock-tss/decision`
+
+Mock tickets can only be exported as `.mock.json`, such as `mock_ticket_iPhone10_5_20H240.mock.json`. The app blocks `.shsh`, `.shsh2`, `.apticket`, `.plist`, and similar real restore artifact names, and backend command runners reject `.mock.json` tickets before invoking restore tools. The `Simulate Restore/Flash` action creates a no-command plan; it never launches `idevicerestore`, `futurerestore`, `palera1n`, `turdus_merula`, `cfgutil`, or any other restore binary.
+
+## Purple Restore Emulator
+
+The `Purple Restore` tab is an internal-only workflow emulator for UI testing. It displays:
+
+```text
+Warning. This is to only be used by apple employees for internal use.
+```
+
+The emulator models Normal Mode, Recovery Mode, DFU Mode, Purple Restore Prepared, Ticket Requested, Ticket Approved, Restore Proceeding, Restore Failed, and Restore Complete states. It checks selected IPSW compatibility against the device ProductType and blocks cross-device firmware before any simulated proceed state.
+
+The mock Tatsu flow is local-only and in-app only. It does not contact Apple, generate valid SHSH/APTicket data, alter trust decisions, authorize real restores, or launch restore binaries. Mock Purple Restore artifacts use `.purple.mock.json` naming and are rejected by backend command guardrails.
+
+## Device Detection
+
+Device detection uses multiple backends and records diagnostics for each attempt:
+
+- Normal mode: `idevice_id -l`, `ideviceinfo`, optional `pymobiledevice3`, and macOS `system_profiler SPUSBDataType`.
+- Recovery mode: `irecovery -q` and `system_profiler SPUSBDataType`.
+- DFU mode: `irecovery -q`, `system_profiler SPUSBDataType`, and Apple USB vendor/product ID matching.
+
+The normalized identity includes ProductType, ProductVersion, BuildVersion, DeviceName, ECID, CPID, BDID, model identifier, USB mode, backend used, and raw diagnostic output. The Connected Device tab includes a Device Diagnostics panel with command availability, command success/failure, stdout/stderr, detected USB entries, and a recommended fix.
+
+Troubleshooting messages distinguish common cases:
+
+- No normal-mode device found: unlock the device and tap Trust.
+- Recovery/DFU device visible over USB, but `irecovery` is missing.
+- USB device detected, but ProductType could not be resolved.
+- Device appears to be in DFU mode; normal-mode tools will not identify it.
+- Install libimobiledevice or configure tool paths in Settings.
+- Apple Mobile Device stack not responding.
+
+Standalone debug command:
+
+```sh
+python -m app.device_debug
+```
+
+It prints OS version, PATH, available tool paths, USB device tree excerpt, normal/recovery/DFU results, final normalized identity, and the recommended next action.
+
+Normal, Recovery, and DFU are different USB states. Normal mode exposes lockdown metadata through libimobiledevice after trust. Recovery and DFU do not expose normal lockdown metadata; use `irecovery` and USB identifiers instead.
+
+## Downgrade
+
+The `Downgrade` tab provides a guided workflow:
+
+- Select device.
+- Select IPSW.
+- Select backend tool.
+- Check compatibility.
+- Show signed restore status.
+- Show risks.
+- Dry run.
+- Execute only after confirmation.
+
+Successful standard downgrades require the target IPSW to be currently signed for the exact device. If Apple is no longer signing that firmware, normal restore backends will usually refuse it. Restores may still fail because of SEP, baseband, activation, cable, host, or device-mode requirements.
 
 ## Safety
 
-iPS-UU does not support unsigned downgrades, signing bypasses, SEP/baseband bypasses, APNonce manipulation, exploit chains, pwned DFU, firmware patching, ticket patching, or private entitlement abuse. Normal restore execution remains guarded by explicit CLI flags and Apple-supported validation paths.
+Warnings are practical:
+
+- This may erase data.
+- This may update the device if the selected firmware is not signed.
+- This may affect activation.
+- This may void warranty.
+- This may fail and require recovery.
+- Check local law before use.
+
+Normal restore execution remains guarded by explicit CLI flags and backend validation paths.
 
 The release does not copy or redistribute Apple Configurator’s `cfgutil` binary, Apple private frameworks, 3uTools, `iTunesFlash`, or private MobileDevice restore helpers. The setup flow detects supported tools already installed on the system and uses them in place.

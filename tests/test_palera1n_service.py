@@ -44,3 +44,13 @@ def test_rootless_button_backend_runs_version_only(tmp_path: Path, monkeypatch) 
     assert result["safety"]["metadata_only"] is True
     assert result["safety"]["jailbreak_action"] is False
     assert "version test" in result["stdout"]
+
+
+def test_rootless_launch_plan_defaults_to_dash_l(tmp_path: Path, monkeypatch) -> None:
+    tool = tmp_path / "palera1n"
+    tool.write_text("#!/bin/sh\nprintf 'palera1n test\\n'\n", encoding="utf-8")
+    tool.chmod(0o755)
+    monkeypatch.setattr("ips_uu.services.external_tools_service.TOOLS_ROOT", tmp_path)
+    plan = pal.build_rootless_launch_plan()
+    assert plan["command"] == [str(tool), "-l"]
+    assert plan["command_preview"].endswith(" -l")

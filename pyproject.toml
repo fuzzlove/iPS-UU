@@ -33,4 +33,4 @@ restore-research = "ips_uu.restore_research:main"
 ips-uu-gui = "ips_uu.gui.app:main"
 
 [tool.setuptools.packages.find]
-include = ["ips_uu*"]
+include = ["ips_uu*", "app*"]

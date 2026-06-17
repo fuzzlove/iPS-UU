@@ -103,3 +103,22 @@ def test_build_tethered_plan_is_manual_prerequisite_only(tmp_path: Path, monkeyp
     assert plan["command"] == []
     assert "No exploit" in plan["command_preview"]
     assert "--tethered" not in plan["command_preview"]
+
+
+def test_build_guide_workflow_for_a10_uses_ios_guide_commands(tmp_path: Path) -> None:
+    ipsw = {"path": str(tmp_path / "target.ipsw")}
+    device = {"product_type": "iPhone9,1", "chip_class": "A10"}
+    workflow = tm.build_guide_workflow(
+        device,
+        ipsw,
+        {
+            "iboot_img4": "/tmp/iBoot.img4",
+            "signed_sep_img4": "/tmp/signed-SEP.img4",
+            "target_sep_im4p": "/tmp/target-SEP.im4p",
+        },
+    )
+    previews = [step["command_preview"] for step in workflow["steps"]]
+    assert workflow["profile"] == "a10x"
+    assert any("turdusra1n -D" in preview for preview in previews)
+    assert any("turdus_merula -o" in preview and "target.ipsw" in preview for preview in previews)
+    assert any("-t /tmp/iBoot.img4 -i /tmp/signed-SEP.img4 -p /tmp/target-SEP.im4p" in preview for preview in previews)

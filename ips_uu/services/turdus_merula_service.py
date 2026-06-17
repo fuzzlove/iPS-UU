@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import platform
+import shlex
 import shutil
 import stat
 import subprocess
@@ -28,6 +29,7 @@ from ips_uu.services.logging_service import get_log_dir
 REPO_ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[2]))
 TOOLS_ROOT = REPO_ROOT / "tools"
 TOOL_NAMES = ("turdus_merula", "turdusra1n")
+GUIDE_URL = "https://ios.cfw.guide/turdusmerula-tethered-macos/"
 
 A9_PRODUCT_TYPES = {
     "iPhone8,1",
@@ -133,6 +135,27 @@ def repair_permissions() -> dict[str, Any]:
     return {"changed": changed, "toolchain": find_toolchain()}
 
 
+def tool_path(name: str) -> str:
+    return str(_repo_tool_path(name))
+
+
+def terminal_command(command: list[str]) -> dict[str, Any]:
+    preview = shlex.join(command)
+    if platform.system() != "Darwin":
+        raise TurdusMerulaError("Opening workflow steps in a new terminal is currently implemented for macOS Terminal.app.")
+    script = f'tell application "Terminal" to do script {json.dumps(preview)}'
+    completed = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, check=False)
+    return {
+        "command": command,
+        "command_preview": preview,
+        "launcher": ["osascript", "-e", script],
+        "returncode": completed.returncode,
+        "stdout": completed.stdout,
+        "stderr": completed.stderr,
+        "succeeded": completed.returncode == 0,
+    }
+
+
 def chip_class_for_product(product_type: str | None) -> str:
     if not product_type:
         return "unknown"
@@ -193,6 +216,140 @@ def inspect_artifacts(paths: dict[str, str | None]) -> dict[str, Any]:
         "notes": [
             "Artifact fields are validated for existence only.",
             "iPS-UU does not parse, patch, generate, replay, or submit SHSH/blob material.",
+        ],
+    }
+
+
+def guide_profile_for_device(device: dict[str, Any] | None) -> str:
+    chip = (device or {}).get("chip_class") or chip_class_for_product((device or {}).get("product_type"))
+    if chip in {"A10", "A10X"}:
+        return "a10x"
+    if chip == "A9/A9X":
+        return "a9x"
+    return "unknown"
+
+
+def build_guide_workflow(
+    device: dict[str, Any] | None,
+    ipsw: dict[str, Any] | None,
+    artifacts: dict[str, str | None] | None = None,
+) -> dict[str, Any]:
+    artifacts = artifacts or {}
+    ipsw_path = str((ipsw or {}).get("path") or "<ipsw file>")
+    profile = guide_profile_for_device(device)
+    turdusra1n = tool_path("turdusra1n")
+    turdus_merula = tool_path("turdus_merula")
+    xattr_target = str(Path(turdus_merula).parent)
+    common = [
+        {
+            "id": "clear_quarantine",
+            "title": "Clear quarantine attributes",
+            "purpose": "Guide step: run /usr/bin/xattr -cr against the extracted tool folder before using the binaries.",
+            "command": ["/usr/bin/xattr", "-cr", xattr_target],
+            "required_mode_before": "macOS host",
+        },
+        {
+            "id": "enter_pwned_dfu",
+            "title": "Run turdusra1n DFU preparation",
+            "purpose": "Guide step: run turdusra1n -D and follow terminal prompts to enter DFU mode.",
+            "command": [turdusra1n, "-D"],
+            "required_mode_before": "Recovery mode, then follow DFU prompts",
+        },
+    ]
+    if profile == "a10x":
+        restore = {
+            "id": "a10_restore",
+            "title": "Restore A10/A10X device",
+            "purpose": "Guide step: run turdus_merula -o with the target IPSW.",
+            "command": [turdus_merula, "-o", ipsw_path],
+            "required_mode_before": "DFU after turdusra1n -D",
+        }
+        boot = {
+            "id": "a10_boot",
+            "title": "Boot tethered A10/A10X device",
+            "purpose": "Guide step: use files produced in image4 after restore.",
+            "command": [
+                turdusra1n,
+                "-t",
+                artifacts.get("iboot_img4") or "<iBoot.img4>",
+                "-i",
+                artifacts.get("signed_sep_img4") or "<signed-SEP.img4>",
+                "-p",
+                artifacts.get("target_sep_im4p") or "<target-SEP.im4p>",
+            ],
+            "required_mode_before": "DFU when prompted",
+        }
+        steps = [*common, restore, boot]
+    elif profile == "a9x":
+        pre = {
+            "id": "a9_get_pre_shcblock",
+            "title": "Get pre-restore shcblock",
+            "purpose": "Guide step: run turdus_merula --get-shcblock with the target IPSW.",
+            "command": [turdus_merula, "--get-shcblock", ipsw_path],
+            "required_mode_before": "DFU after turdusra1n -D",
+        }
+        restore = {
+            "id": "a9_restore",
+            "title": "Restore A9/A9X device with shcblock",
+            "purpose": "Guide step: run turdus_merula -o --load-shcblock <shcblock> <ipsw>.",
+            "command": [
+                turdus_merula,
+                "-o",
+                "--load-shcblock",
+                artifacts.get("shcblock") or "<shcblock>",
+                ipsw_path,
+            ],
+            "required_mode_before": "DFU after turdusra1n -D",
+        }
+        post = {
+            "id": "a9_get_post_shcblock",
+            "title": "Get post-restore shcblock",
+            "purpose": "Guide step: run turdusra1n -g.",
+            "command": [turdusra1n, "-g"],
+            "required_mode_before": "DFU when prompted",
+        }
+        pte = {
+            "id": "a9_get_pteblock",
+            "title": "Get pteblock",
+            "purpose": "Guide step: run turdusra1n -g -i <signed-SEP.img4> -C <post shcblock>.",
+            "command": [
+                turdusra1n,
+                "-g",
+                "-i",
+                artifacts.get("signed_sep_img4") or "<signed-SEP.img4>",
+                "-C",
+                artifacts.get("post_shcblock") or "<post-restore shcblock>",
+            ],
+            "required_mode_before": "DFU when prompted",
+        }
+        boot = {
+            "id": "a9_boot",
+            "title": "Boot tethered A9/A9X device",
+            "purpose": "Guide step: run turdusra1n -TP <pteblock>.",
+            "command": [turdusra1n, "-TP", artifacts.get("pteblock") or "<pteblock>"],
+            "required_mode_before": "DFU when prompted",
+        }
+        steps = [*common, pre, *common[1:], restore, post, pte, boot]
+    else:
+        steps = common
+    return {
+        "workflow": "ios_guide_turdus_merula_tethered_macos",
+        "guide_url": GUIDE_URL,
+        "profile": profile,
+        "device": device,
+        "ipsw": ipsw,
+        "steps": [
+            {
+                **step,
+                "command_preview": shlex.join([str(part) for part in step["command"]]),
+            }
+            for step in steps
+        ],
+        "warnings": [
+            "Tethered restores require a computer to boot every time.",
+            "Cellular A10X iPad Pros and some iPhone 7 devices may fail activation on iOS 10 due to baseband compatibility.",
+            "checkra1n/palera1n need extra steps and cannot be run standalone on tethered downgraded devices.",
+            "Commands are external backend commands; iPS-UU does not rewrite Turdus Merula exploit logic.",
         ],
     }
 

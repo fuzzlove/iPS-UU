@@ -5,17 +5,35 @@ from pathlib import Path
 
 
 block_cipher = None
-local_idevicerestore = Path("tools/idevicerestore")
-source_tree_idevicerestore = Path("idevicerestore-1.0.0/src/idevicerestore")
 optional_binaries = []
-if local_idevicerestore.exists():
-    optional_binaries.append((str(local_idevicerestore), "tools"))
-elif source_tree_idevicerestore.exists():
-    optional_binaries.append((str(source_tree_idevicerestore), "tools"))
-for optional_tool in ("tools/palera1n", "tools/turdus_merula", "tools/turdusra1n"):
+optional_datas = []
+bundled_tool_names = (
+    "idevicerestore",
+    "idevicerestore.arm64",
+    "idevicerestore.x86_64",
+    "ideviceinstaller",
+    "idevice_id",
+    "ideviceinfo",
+    "idevicepair",
+    "idevicediagnostics",
+    "ideviceenterrecovery",
+    "irecovery",
+    "idevicescreenshot",
+    "cfgutil",
+)
+for tool_name in bundled_tool_names:
+    optional_tool = f"tools/{tool_name}"
     optional_tool_path = Path(optional_tool)
-    if optional_tool_path.exists():
+    if optional_tool_path.exists() and optional_tool_path.is_file():
         optional_binaries.append((str(optional_tool_path), "tools"))
+    elif optional_tool_path.exists() and optional_tool_path.is_dir():
+        optional_datas.append((str(optional_tool_path), f"tools/{tool_name}"))
+    nested_tool_path = Path("tools/libimobiledevice") / tool_name
+    if nested_tool_path.exists():
+        optional_binaries.append((str(nested_tool_path), "tools/libimobiledevice"))
+source_tree_idevicerestore = Path("idevicerestore-1.0.0/src/idevicerestore")
+if not Path("tools/idevicerestore").exists() and source_tree_idevicerestore.exists():
+    optional_binaries.append((str(source_tree_idevicerestore), "tools"))
 
 a = Analysis(
     ["ips_uu/gui/app.py"],
@@ -29,11 +47,11 @@ a = Analysis(
         ("RESTORECTL_README.md", "."),
         ("findings.md", "."),
         ("restore_backend_map.json", "."),
-        ("tools/cfgutil", "tools"),
+        ("data/ios_device_map.json", "data"),
         ("assets/icons/ips-uu.icns", "assets/icons"),
         ("assets/icons/ips-uu.ico", "assets/icons"),
         ("assets/icons/png/ips-uu-icon-main-1024.png", "assets/icons/png"),
-    ],
+    ] + optional_datas,
     hiddenimports=collect_submodules("ips_uu"),
     hookspath=[],
     hooksconfig={},

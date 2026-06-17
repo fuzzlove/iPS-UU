@@ -29,6 +29,20 @@ class RestoreCtlError(RuntimeError):
     pass
 
 
+REPO_ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1]))
+TOOLS_ROOT = REPO_ROOT / "tools"
+
+
+def resolve_bundled_or_path_tool(name: str) -> str | None:
+    local = TOOLS_ROOT / name
+    if local.exists() and local.is_file():
+        return str(local)
+    nested = TOOLS_ROOT / "libimobiledevice" / name
+    if nested.exists() and nested.is_file():
+        return str(nested)
+    return shutil.which(name)
+
+
 TOOL_CATALOG = {
     "idevicerestore": {
         "classification": "supported_restore_executor",
@@ -132,7 +146,7 @@ def decimal_to_hex(value: str | None) -> str | None:
 
 
 def detect_normal_device(device: str) -> DeviceSnapshot | None:
-    binary = shutil.which("ideviceinfo")
+    binary = resolve_bundled_or_path_tool("ideviceinfo")
     if not binary:
         return None
     command = [binary, "-x"]
@@ -181,7 +195,7 @@ def parse_irecovery_query(text: str) -> dict[str, str]:
 
 
 def detect_recovery_or_dfu(device: str) -> DeviceSnapshot | None:
-    binary = shutil.which("irecovery")
+    binary = resolve_bundled_or_path_tool("irecovery")
     if not binary:
         return None
     command = [binary, "-q"]
@@ -397,7 +411,7 @@ def restore_command(args: argparse.Namespace) -> int:
 def tool_inventory() -> dict[str, Any]:
     tools: dict[str, Any] = {}
     for name, metadata in TOOL_CATALOG.items():
-        path = shutil.which(name)
+        path = resolve_bundled_or_path_tool(name)
         tools[name] = {
             "path": path,
             "installed": bool(path),

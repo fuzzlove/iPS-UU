@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+- Reworked device identification with multi-backend normal/recovery/DFU detection, USB fallback matching, normalized identity fields, command diagnostics, and recommended fixes.
+- Added `data/ios_device_map.json` for known ProductType marketing/chip/backend-category metadata with explicit manual-verification fallback.
+- Removed Forsake as a first-class release workflow so the app can focus on firmware flashing, recovery, device statistics, and signed restore analysis.
+- Changed the Restore tab action to an always-clickable `Force Signed Flash` flow that preflights backend availability, shows the exact signed restore command or blocker, and remains confirmation-gated.
+- Added a local-only Signing Simulator with mock TSS-style API endpoints, `.mock.json` exports, explicit simulation banner, a simulation-only restore/flash workflow state, and guardrails preventing mock tickets from being used with restore tools.
+- Added an internal-only Purple Restore / mock Tatsu workflow emulator with state-machine UI, cross-device IPSW blocking, `.purple.mock.json` guardrails, and no real restore execution path.
+- Added `python -m app.device_debug` for standalone device detection diagnostics.
+- Changed the GUI sidebar motto to `Professional IPSW matters.`
+- Bundled `ideviceinstaller`, `idevice_id`, `ideviceinfo`, `idevicepair`, `idevicediagnostics`, `ideviceenterrecovery`, and `irecovery` with the release from `tools/`.
+- Added release-time bundled-tool architecture auditing so Mach-O tools must include both `arm64` and `x86_64` slices for Apple Silicon and Intel Macs.
+- Expanded connected-device fingerprinting with additional ideviceinfo domains, hardware identifiers, chip/die/board details, activation/baseband state, battery/storage metadata, and fuller diagnostics.
+- Added verbose Connected Device detail cards so fingerprint metadata is visible in the GUI instead of only in raw JSON diagnostics.
+- Added Connected Device controls for shutdown, restart, recovery mode, exit recovery mode, DFU instructions, and an actual `idevicescreenshot`-backed screen preview when the trusted device permits capture.
+- Removed the Jailbreak / Boot and Turdus Merula GUI workflow surfaces from the main application.
+- Added NovaCerts Restore Options: a GUI tab for signed restore/update/reinstall/downgrade feasibility, selected-IPSW compatibility/signing status, restore-without-updating guidance, external backend support, dry-run command planning, and session logging.
+- Repositioned the app as a professional wrapper workspace for iOS restore, recovery, signed downgrade analysis, app-install, firmware inspection, and device statistics.
+- Updated the GUI navigation to Dashboard, Connected Device, Firmware / IPSW, Restore Options, Restore, Downgrade, Apps / Install, Logs, Tools, Settings, and About.
+- Added backend wrapper services for tool discovery, subprocess command planning/running, idevicerestore, and ideviceinstaller, using explicit argument lists, session logs, streamable output, and cancel support.
+- Added a Tools tab for bundled backend discovery, detected/missing state, paths, executable status, passive versions, purposes, workflows, required modes, device-family guidance, license hints, diagnostics, and folder access.
+- Added Backend Inspector mode for open-source bundled source files, documenting entry points, CLI arguments, supported devices, required files, output/error patterns, environment requirements, and workflow phases without decompiling closed-source binaries.
+- Refocused the Downgrade screen on signed firmware compatibility, signing expectations, visible command previews, practical warnings, dry-run planning, and explicit confirmation gating.
+- Updated About and README language to describe U.S. DMCA exemption context while warning users to check local law, warranty, carrier obligations, activation, recovery, and data-loss risks.
 - Prepared first-release packaging metadata, PyInstaller bundled docs/tool inventory inputs, release checklist, screenshot placeholders, and a `scripts/check_release.sh` verifier.
 - Added a professional PySide6 desktop GUI for iPS-UU restore research.
 - Added Dashboard, Device / Target, Firmware / IPSW, Restore Research / Dry Run, Logs, Settings, and About views.
@@ -19,8 +41,5 @@
 - Added a safe 3uTools-style Super Restore adapter for backup/data restore through `idevicebackup2` or `cfgutil restore-backup`.
 - Added a clean-room iOS Device Viewer using libimobiledevice-style tools for USB device listing, metadata, pairing/trust status, unlock guidance, diagnostics, a static device visual, and a safe screen-preview placeholder.
 - Expanded iOS Device Viewer metadata with model name, serial, logic-board identifiers, ECID, model ID, firmware version, IMEI, Wi-Fi/Bluetooth addresses, device storage/free space, and guarded restart/shutdown/recovery controls.
-- Added an External Tools GUI inventory page with passive palera1n detection, version/permission/signature/hash metadata, static compatibility notes, and explicit no-execution policy.
-- Added a dedicated palera1n GUI tab for guide-based external prerequisite documentation, static compatibility preflight, caveat acknowledgements, and no-command guidance logs.
+- Added external backend inventory metadata for bundled restore, recovery, diagnostics, flashing, and app-install tools.
 - Added a clean-room SHSH/APTicket blob inspector for local plist-style blob metadata, nonce/generator field extraction, and optional expected-value comparison without restore use or signing bypass behavior.
-- Added a Turdus Merula GUI workflow wrapper for tool discovery, permissions repair, device/IPSW preflight, DFU guidance, dry-run workflow planning, and session logs.
-- Refactored the Turdus Merula GUI into a manual-prerequisite workflow: iPS-UU no longer presents pwnDFU/exploit execution actions, and now performs passive device-state and artifact-path validation only.

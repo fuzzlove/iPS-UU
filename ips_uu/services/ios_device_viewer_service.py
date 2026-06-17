@@ -13,6 +13,7 @@ import plistlib
 import shutil
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,6 +23,23 @@ from typing import Any, Protocol
 REPO_ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[2]))
 TOOLS_ROOT = REPO_ROOT / "tools"
 DEFAULT_TIMEOUT = 8
+LIBIMOBILEDEVICE_TOOL_NAMES = (
+    "idevice_id",
+    "ideviceinfo",
+    "idevicepair",
+    "idevicediagnostics",
+    "ideviceenterrecovery",
+    "ideviceinstaller",
+    "idevicescreenshot",
+    "irecovery",
+)
+VERBOSE_INFO_DOMAINS = (
+    None,
+    "com.apple.disk_usage",
+    "com.apple.mobile.battery",
+    "com.apple.mobile.iTunes",
+    "com.apple.mobile.lockdown_cache",
+)
 
 
 class DeviceViewerError(RuntimeError):
@@ -56,6 +74,22 @@ class DeviceRecord:
     product_version: str | None = None
     build_version: str | None = None
     firmware_version: str | None = None
+    hardware_model: str | None = None
+    board_id: str | None = None
+    chip_id: str | None = None
+    die_id: str | None = None
+    unique_device_id: str | None = None
+    baseband_version: str | None = None
+    baseband_serial_number: str | None = None
+    activation_state: str | None = None
+    device_class: str | None = None
+    cpu_architecture: str | None = None
+    region_info: str | None = None
+    color: str | None = None
+    enclosure_color: str | None = None
+    battery_current_capacity: int | None = None
+    battery_is_charging: bool | None = None
+    fingerprint: dict[str, Any] = field(default_factory=dict)
     connection_status: str = "Connected"
     pairing_status: str = "Unknown"
     lock_status: str = "Unknown"
@@ -95,6 +129,9 @@ def resolve_tool(name: str) -> str | None:
     local = TOOLS_ROOT / name
     if local.exists() and local.is_file() and os.access(local, os.X_OK):
         return str(local)
+    nested = TOOLS_ROOT / "libimobiledevice" / name
+    if nested.exists() and nested.is_file() and os.access(nested, os.X_OK):
+        return str(nested)
     return shutil.which(name)
 
 
@@ -106,6 +143,76 @@ def run_command(args: list[str], timeout: int = DEFAULT_TIMEOUT) -> CommandResul
     except FileNotFoundError as exc:
         return CommandResult(args=args, returncode=127, stdout="", stderr=str(exc))
     return CommandResult(args=args, returncode=completed.returncode, stdout=completed.stdout, stderr=completed.stderr)
+
+
+def host_usb_inventory(timeout: int = DEFAULT_TIMEOUT) -> dict[str, Any]:
+    """Return a lightweight macOS USB inventory focused on Apple mobile devices."""
+    if platform.system() != "Darwin":
+        return {"available": False, "reason": "USB host inventory is currently implemented for macOS system_profiler."}
+    result = run_command(["system_profiler", "SPUSBDataType"], timeout=timeout)
+    text = "\n".join(part for part in (result.stdout, result.stderr) if part)
+    apple_markers = ("iPhone", "iPad", "iPod", "Apple Mobile Device", "Vendor ID: 0x05ac")
+    present = any(marker.lower() in text.lower() for marker in apple_markers)
+    matched_lines = [
+        line.strip()
+        for line in text.splitlines()
+        if any(marker.lower() in line.lower() for marker in apple_markers)
+    ]
+    return {
+        "available": result.returncode == 0 and not result.timed_out,
+        "apple_mobile_device_present": present,
+        "matched_lines": matched_lines,
+        "returncode": result.returncode,
+        "timed_out": result.timed_out,
+        "error": (result.stderr or "").strip() if result.returncode != 0 or result.timed_out else None,
+    }
+
+
+def trust_diagnosis(detected: dict[str, Any], devices: list["DeviceRecord"], usb_inventory: dict[str, Any]) -> dict[str, Any]:
+    if devices:
+        untrusted = any("Needs Trust" in record.badges or record.pairing_status == "Needs Trust" for record in devices)
+        locked = any("Locked" in record.badges or record.lock_status == "Locked" for record in devices)
+        if untrusted:
+            return {
+                "status": "connected_not_trusted",
+                "summary": "The device is visible over USB but has not trusted this computer.",
+                "next_steps": ["Unlock the device.", "Tap Trust This Computer.", "Run Refresh Device again."],
+            }
+        if locked:
+            return {
+                "status": "connected_locked",
+                "summary": "The device is visible but locked metadata is limited.",
+                "next_steps": ["Unlock the device.", "Keep it on the Home Screen.", "Run Refresh Device again."],
+            }
+        return {
+            "status": "trusted_or_metadata_available",
+            "summary": "The device is visible and metadata is available.",
+            "next_steps": ["Continue with restore option checks or backend diagnostics."],
+        }
+    if usb_inventory.get("available") and not usb_inventory.get("apple_mobile_device_present"):
+        return {
+            "status": "not_physically_detected",
+            "summary": "macOS does not currently show an Apple mobile USB device. This is not a trust-prompt failure yet.",
+            "next_steps": [
+                "Use a data-capable cable, not a charge-only cable.",
+                "Connect directly or try a different USB port/hub.",
+                "Wake and unlock the device.",
+                "If in DFU, the screen should be black; use recovery/DFU detection after reconnecting.",
+            ],
+        }
+    if detected.get("error"):
+        error = str(detected.get("error"))
+        if "usbmuxd" in error.lower():
+            return {
+                "status": "usbmux_access_error",
+                "summary": "The tool could not talk to usbmuxd in this process environment.",
+                "next_steps": ["Run outside sandbox/restricted terminal if applicable.", "Restart the app.", "Reconnect the device."],
+            }
+    return {
+        "status": "no_device_found",
+        "summary": "No device was returned by libimobiledevice.",
+        "next_steps": ["Reconnect the device.", "Unlock and trust when prompted.", "Refresh Device."],
+    }
 
 
 def tool_version(path: str | None) -> dict[str, Any]:
@@ -293,9 +400,32 @@ class LibimobiledeviceInfoProvider:
             info = plistlib.loads(result.stdout.encode())
         except Exception as exc:
             return {"error": f"could not parse ideviceinfo plist output: {exc}", "tool": binary, "command": result.args}
+        domains: dict[str, Any] = {"lockdown": info}
+        domain_commands = [result.args]
+        for domain in VERBOSE_INFO_DOMAINS:
+            if domain is None:
+                continue
+            domain_result = run_command([binary, "-u", udid, "-q", domain, "-x"], timeout=self.timeout)
+            domain_commands.append(domain_result.args)
+            if domain_result.returncode != 0 or domain_result.timed_out or not domain_result.stdout.strip():
+                domains[domain] = {
+                    "error": (domain_result.stderr or domain_result.stdout).strip() or "domain query failed",
+                    "returncode": domain_result.returncode,
+                }
+                continue
+            try:
+                value = plistlib.loads(domain_result.stdout.encode())
+            except Exception as exc:
+                value = {"error": f"could not parse domain plist output: {exc}"}
+            domains[domain] = value
+        disk = domains.get("com.apple.disk_usage") if isinstance(domains.get("com.apple.disk_usage"), dict) else {}
+        battery = domains.get("com.apple.mobile.battery") if isinstance(domains.get("com.apple.mobile.battery"), dict) else {}
+        itunes = domains.get("com.apple.mobile.iTunes") if isinstance(domains.get("com.apple.mobile.iTunes"), dict) else {}
+        fingerprint = device_fingerprint(info, domains)
         return {
             "tool": binary,
             "command": result.args,
+            "commands": domain_commands,
             "device_name": info.get("DeviceName"),
             "model_name": model_name_for_product(info.get("ProductType"), info.get("MarketingName") or info.get("ModelName")),
             "serial_number": info.get("SerialNumber"),
@@ -306,12 +436,28 @@ class LibimobiledeviceInfoProvider:
             "imei": info.get("InternationalMobileEquipmentIdentity") or info.get("IMEI"),
             "wifi_address": info.get("WiFiAddress"),
             "bluetooth_address": info.get("BluetoothAddress"),
-            "disk_capacity_bytes": _int_or_none(info.get("TotalDiskCapacity") or info.get("TotalDataCapacity")),
-            "disk_free_bytes": _int_or_none(info.get("TotalSystemAvailable") or info.get("TotalDataAvailable") or info.get("AmountDataAvailable")),
+            "disk_capacity_bytes": _int_or_none(info.get("TotalDiskCapacity") or info.get("TotalDataCapacity") or disk.get("TotalDiskCapacity") or disk.get("TotalDataCapacity")),
+            "disk_free_bytes": _int_or_none(info.get("TotalSystemAvailable") or info.get("TotalDataAvailable") or info.get("AmountDataAvailable") or disk.get("TotalSystemAvailable") or disk.get("TotalDataAvailable")),
             "product_type": info.get("ProductType"),
             "product_version": info.get("ProductVersion"),
             "build_version": info.get("BuildVersion"),
             "firmware_version": info.get("ProductVersion"),
+            "hardware_model": info.get("HardwareModel"),
+            "board_id": str(info.get("BoardId") or info.get("BoardID") or "") or None,
+            "chip_id": str(info.get("ChipID") or "") or None,
+            "die_id": str(info.get("DieID") or "") or None,
+            "unique_device_id": info.get("UniqueDeviceID"),
+            "baseband_version": info.get("BasebandVersion"),
+            "baseband_serial_number": info.get("BasebandSerialNumber"),
+            "activation_state": info.get("ActivationState"),
+            "device_class": info.get("DeviceClass"),
+            "cpu_architecture": info.get("CPUArchitecture") or itunes.get("CPUArchitecture"),
+            "region_info": info.get("RegionInfo"),
+            "color": info.get("DeviceColor") or info.get("Color"),
+            "enclosure_color": info.get("DeviceEnclosureColor") or info.get("EnclosureColor"),
+            "battery_current_capacity": _int_or_none(battery.get("BatteryCurrentCapacity") or battery.get("CurrentCapacity")),
+            "battery_is_charging": battery.get("BatteryIsCharging") if isinstance(battery.get("BatteryIsCharging"), bool) else None,
+            "fingerprint": fingerprint,
             "raw": {
                 key: info.get(key)
                 for key in (
@@ -330,6 +476,15 @@ class LibimobiledeviceInfoProvider:
                     "BuildVersion",
                     "UniqueChipID",
                     "UniqueDeviceID",
+                    "ChipID",
+                    "DieID",
+                    "BasebandVersion",
+                    "BasebandSerialNumber",
+                    "ActivationState",
+                    "DeviceClass",
+                    "CPUArchitecture",
+                    "DeviceColor",
+                    "DeviceEnclosureColor",
                     "InternationalMobileEquipmentIdentity",
                     "IMEI",
                     "WiFiAddress",
@@ -341,6 +496,7 @@ class LibimobiledeviceInfoProvider:
                     "AmountDataAvailable",
                 )
             },
+            "raw_domains": domains,
         }
 
 
@@ -362,14 +518,59 @@ class LibimobiledevicePairingStatusProvider:
         return {"status": pairing if pairing != "Unknown" else "Needs Trust", "error": text or "pairing validation failed.", "badges": badges, "tool": binary, "command": result.args}
 
 
+class LibimobiledeviceScreenProvider:
+    def __init__(self, timeout: int = DEFAULT_TIMEOUT) -> None:
+        self.timeout = timeout
+
+    def screen_status(self, udid: str | None = None) -> dict[str, Any]:
+        binary = resolve_tool("idevicescreenshot")
+        if not binary:
+            return {
+                "available": False,
+                "udid": mask_udid(udid),
+                "message": "idevicescreenshot was not found in tools/ or PATH.",
+                "policy": "No private Apple APIs, exploit paths, jailbreak-only methods, or copied third-party behavior are used.",
+            }
+        if not udid:
+            return {
+                "available": False,
+                "udid": None,
+                "tool": binary,
+                "message": "Connect and trust a normal-mode device to capture a screen preview.",
+                "policy": "Uses idevicescreenshot only.",
+            }
+        screenshot_dir = Path(tempfile.gettempdir()) / "ips-uu" / "screens"
+        screenshot_dir.mkdir(parents=True, exist_ok=True)
+        target = screenshot_dir / f"{mask_udid(udid) or 'device'}-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}.png"
+        command = [binary, "-u", udid, str(target)]
+        result = run_command(command, timeout=self.timeout)
+        if result.returncode != 0 or result.timed_out or not target.exists():
+            return {
+                "available": False,
+                "udid": mask_udid(udid),
+                "tool": binary,
+                "command": command,
+                "returncode": result.returncode,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "timed_out": result.timed_out,
+                "message": (result.stderr or result.stdout).strip() or "Screen capture was unavailable.",
+                "policy": "Uses idevicescreenshot only.",
+            }
+        return {
+            "available": True,
+            "udid": mask_udid(udid),
+            "tool": binary,
+            "command": command,
+            "path": str(target),
+            "message": "Screen preview captured through idevicescreenshot.",
+            "policy": "Uses idevicescreenshot only.",
+        }
+
+
 class PlaceholderScreenProvider:
     def screen_status(self, udid: str | None = None) -> dict[str, Any]:
-        return {
-            "available": False,
-            "udid": udid,
-            "message": "Live screen preview requires a supported, user-authorized capture backend.",
-            "policy": "No private Apple APIs, exploit paths, jailbreak-only methods, or copied 3uTools behavior are used.",
-        }
+        return LibimobiledeviceScreenProvider().screen_status(udid)
 
 
 class DeviceViewerController:
@@ -398,6 +599,8 @@ class DeviceViewerController:
                 last_error = record.errors[-1]
         screen = self.screen_provider.screen_status(devices[0].udid if devices else None)
         tools = self._tool_diagnostics()
+        usb_inventory = host_usb_inventory()
+        diagnosis = trust_diagnosis(detected, devices, usb_inventory)
         return {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "os_version": platform.platform(),
@@ -405,6 +608,8 @@ class DeviceViewerController:
             "connection_status": "Connected" if devices else "No device connected",
             "devices": [self._record_to_dict(record) for record in devices],
             "screen": screen,
+            "host_usb": usb_inventory,
+            "trust_diagnosis": diagnosis,
             "last_error": last_error,
             "guidance": self._guidance(devices, detected),
             "diagnostics": self._diagnostics(devices, tools, last_error),
@@ -448,6 +653,22 @@ class DeviceViewerController:
             product_version=info.get("product_version"),
             build_version=info.get("build_version"),
             firmware_version=info.get("firmware_version") or info.get("product_version"),
+            hardware_model=info.get("hardware_model"),
+            board_id=info.get("board_id"),
+            chip_id=info.get("chip_id"),
+            die_id=info.get("die_id"),
+            unique_device_id=info.get("unique_device_id"),
+            baseband_version=info.get("baseband_version"),
+            baseband_serial_number=info.get("baseband_serial_number"),
+            activation_state=info.get("activation_state"),
+            device_class=info.get("device_class"),
+            cpu_architecture=info.get("cpu_architecture"),
+            region_info=info.get("region_info"),
+            color=info.get("color"),
+            enclosure_color=info.get("enclosure_color"),
+            battery_current_capacity=info.get("battery_current_capacity"),
+            battery_is_charging=info.get("battery_is_charging"),
+            fingerprint=info.get("fingerprint") or {},
             pairing_status=pairing_status,
             lock_status=lock_status,
             badges=list(dict.fromkeys(badges)),
@@ -476,6 +697,22 @@ class DeviceViewerController:
             "product_version": record.product_version,
             "build_version": record.build_version,
             "firmware_version": record.firmware_version,
+            "hardware_model": record.hardware_model,
+            "board_id": record.board_id,
+            "chip_id": record.chip_id,
+            "die_id": record.die_id,
+            "unique_device_id": record.unique_device_id,
+            "baseband_version": record.baseband_version,
+            "baseband_serial_number": record.baseband_serial_number,
+            "activation_state": record.activation_state,
+            "device_class": record.device_class,
+            "cpu_architecture": record.cpu_architecture,
+            "region_info": record.region_info,
+            "color": record.color,
+            "enclosure_color": record.enclosure_color,
+            "battery_current_capacity": record.battery_current_capacity,
+            "battery_is_charging": record.battery_is_charging,
+            "fingerprint": record.fingerprint,
             "connection_status": record.connection_status,
             "pairing_status": record.pairing_status,
             "lock_status": record.lock_status,
@@ -486,7 +723,7 @@ class DeviceViewerController:
 
     def _tool_diagnostics(self) -> dict[str, Any]:
         tools = {}
-        for name in ("idevice_id", "ideviceinfo", "idevicepair"):
+        for name in LIBIMOBILEDEVICE_TOOL_NAMES:
             path = resolve_tool(name)
             tools[name] = {"path": path, "present": path is not None, "version": tool_version(path)}
         return tools
@@ -515,6 +752,55 @@ class DeviceViewerController:
             "last_pairing_or_status_error": last_error,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
+
+
+def device_fingerprint(info: dict[str, Any], domains: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Build a verbose hardware/software fingerprint from user-authorized metadata."""
+    domains = domains or {}
+    disk = domains.get("com.apple.disk_usage") if isinstance(domains.get("com.apple.disk_usage"), dict) else {}
+    battery = domains.get("com.apple.mobile.battery") if isinstance(domains.get("com.apple.mobile.battery"), dict) else {}
+    return {
+        "identity": {
+            "product_type": info.get("ProductType"),
+            "model_number": info.get("ModelNumber"),
+            "region_info": info.get("RegionInfo"),
+            "serial_number": info.get("SerialNumber"),
+            "udid": info.get("UniqueDeviceID"),
+            "ecid": str(info.get("UniqueChipID")) if info.get("UniqueChipID") else None,
+        },
+        "hardware": {
+            "hardware_model": info.get("HardwareModel"),
+            "board_id": info.get("BoardId") or info.get("BoardID"),
+            "chip_id": info.get("ChipID"),
+            "die_id": info.get("DieID"),
+            "device_class": info.get("DeviceClass"),
+            "cpu_architecture": info.get("CPUArchitecture"),
+            "device_color": info.get("DeviceColor") or info.get("Color"),
+            "enclosure_color": info.get("DeviceEnclosureColor") or info.get("EnclosureColor"),
+        },
+        "firmware": {
+            "product_version": info.get("ProductVersion"),
+            "build_version": info.get("BuildVersion"),
+            "activation_state": info.get("ActivationState"),
+            "baseband_version": info.get("BasebandVersion"),
+            "baseband_serial_number": info.get("BasebandSerialNumber"),
+        },
+        "radios": {
+            "imei": info.get("InternationalMobileEquipmentIdentity") or info.get("IMEI"),
+            "meid": info.get("MobileEquipmentIdentifier") or info.get("MEID"),
+            "wifi_address": info.get("WiFiAddress"),
+            "bluetooth_address": info.get("BluetoothAddress"),
+        },
+        "storage": {
+            "total_bytes": _int_or_none(info.get("TotalDiskCapacity") or info.get("TotalDataCapacity") or disk.get("TotalDiskCapacity") or disk.get("TotalDataCapacity")),
+            "free_bytes": _int_or_none(info.get("TotalSystemAvailable") or info.get("TotalDataAvailable") or info.get("AmountDataAvailable") or disk.get("TotalDataAvailable")),
+        },
+        "battery": {
+            "current_capacity": _int_or_none(battery.get("BatteryCurrentCapacity") or battery.get("CurrentCapacity")),
+            "is_charging": battery.get("BatteryIsCharging") if isinstance(battery.get("BatteryIsCharging"), bool) else None,
+        },
+        "metadata_domains": sorted(domains.keys()),
+    }
 
 
 def load_device_viewer_snapshot() -> dict[str, Any]:

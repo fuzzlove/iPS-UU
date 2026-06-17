@@ -10,39 +10,40 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ips_uu import __version__
-from ips_uu.services.contents_research_service import contents_requirements
+from ips_uu.services.contents_research_service import DEFAULT_CONTENTS_ROOT, contents_requirements
 from ips_uu.services.dependency_setup_service import dependency_setup
 from ips_uu.services.device_service import detect_target
 from ips_uu.services.external_tools_service import scan_external_tools
+from ips_uu.services.ideviceinstaller_service import build_install_plan
+from ips_uu.services.idevicerestore_service import build_restore_plan
 from ips_uu.services.ios_device_viewer_service import load_device_viewer_snapshot, perform_device_action
 from ips_uu.services.ipsw_service import compatibility_summary, parse_ipsw
 from ips_uu.services.logging_service import configure_logging, get_log_dir
-from ips_uu.services.palera1n_service import (
-    build_manual_plan as build_palera1n_plan,
-    check_requirements as check_palera1n_requirements,
-    find_toolchain as find_palera1n_toolchain,
-    inspect_device as inspect_palera1n_device,
-    run_dry_run as run_palera1n_dry_run,
-    run_rootless_version_check,
+from ips_uu.services.mock_tss_service import (
+    RESULT_STATUSES,
+    SIMULATION_BANNER,
+    generate_mock_response,
+    safe_mock_ticket_name,
+    save_mock_ticket,
+    simulated_restore_flash_plan,
+)
+from ips_uu.services.purple_restore_service import (
+    PURPLE_SIMULATION_BANNER,
+    PURPLE_STATES,
+    build_purple_restore_session,
+    request_mock_tatsu_ticket,
+    run_purple_restore_simulation,
 )
 from ips_uu.services.restore_service import backend_inventory, dry_run_plan, execute_restore
+from ips_uu.services.restore_options_service import analyze_restore_options
 from ips_uu.services.settings_service import AppSettings, load_settings, save_settings
 from ips_uu.services.shsh_blob_service import inspect_blob as inspect_shsh_blob
-from ips_uu.services.turdus_merula_service import (
-    build_tethered_plan,
-    check_requirements,
-    find_toolchain,
-    inspect_artifacts as inspect_turdus_artifacts,
-    inspect_device as inspect_turdus_device,
-    inspect_ipsw as inspect_turdus_ipsw,
-    repair_permissions as repair_turdus_permissions,
-    run_dry_run as run_turdus_dry_run,
-)
+from ips_uu.services.tool_discovery import analyze_open_source_tool, discover_tools, run_diagnostics
 from ips_uu.restore_research import CONTENTS_RESTORE_METHODS
 
 try:
     from PySide6.QtCore import QMargins, QRectF, QObject, QRunnable, Qt, QThreadPool, QTimer, QUrl, Signal, Slot
-    from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QIcon, QPainter, QPen, QTextCursor
+    from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QIcon, QPainter, QPen, QPixmap, QTextCursor
     from PySide6.QtWidgets import (
         QApplication,
         QCheckBox,
@@ -109,6 +110,7 @@ class QtLogHandler(logging.Handler):
 
 class WorkerSignals(QObject):
     started = Signal(str)
+    stream = Signal(str, str, str)
     result = Signal(str, object)
     error = Signal(str, str)
     finished = Signal(str)
@@ -196,6 +198,30 @@ def terminal_text(result: dict[str, Any]) -> str:
     lines.append(f"[exit {result.get('returncode')}]")
     lines.append("$ ")
     return "\n".join(lines)
+
+
+def json_safe(value: Any) -> Any:
+    if isinstance(value, bytes):
+        return {
+            "type": "bytes",
+            "length": len(value),
+            "hex_preview": value[:64].hex(),
+        }
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(key): json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [json_safe(item) for item in value]
+    try:
+        json.dumps(value)
+    except TypeError:
+        return str(value)
+    return value
+
+
+def json_text(value: Any) -> str:
+    return json.dumps(json_safe(value), indent=2, sort_keys=True)
 
 
 class Card(QFrame):
@@ -355,19 +381,117 @@ class DevicePreviewWidget(QWidget):
         )
 
 
+class DeviceHeaderPanel(QFrame):
+    """Compact connected-device summary inspired by professional restore tools."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setObjectName("DeviceHeader")
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(10)
+
+        top = QHBoxLayout()
+        names = QVBoxLayout()
+        self.title = QLabel("No device connected")
+        self.title.setObjectName("DeviceHeaderTitle")
+        self.subtitle = QLabel("Connect a device over USB and refresh.")
+        self.subtitle.setObjectName("Muted")
+        self.subtitle.setWordWrap(True)
+        names.addWidget(self.title)
+        names.addWidget(self.subtitle)
+        top.addLayout(names, 1)
+        self.badges = QHBoxLayout()
+        top.addLayout(self.badges)
+        layout.addLayout(top)
+
+        self.metrics = QGridLayout()
+        self.metrics.setHorizontalSpacing(12)
+        self.metrics.setVerticalSpacing(8)
+        layout.addLayout(self.metrics)
+
+    def set_device(self, device: dict[str, Any] | None, fallback: dict[str, Any] | None = None) -> None:
+        clear_layout(self.badges)
+        clear_layout(self.metrics)
+        data = device or fallback or {}
+        if not data:
+            self.title.setText("No device connected")
+            self.subtitle.setText("Connect a device over USB and refresh.")
+            self.badges.addWidget(pill("Disconnected", "neutral"))
+            return
+
+        model = str(data.get("model_name") or data.get("marketing_name") or data.get("product_type") or "iOS Device")
+        device_name = str(data.get("device_name") or model)
+        product = str(data.get("product_type") or "Unknown ProductType")
+        version = str(data.get("firmware_version") or data.get("product_version") or "iOS unknown")
+        build = str(data.get("build_version") or "")
+        mode = str(data.get("current_mode") or data.get("connection_status") or "Unknown")
+        self.title.setText(device_name)
+        self.subtitle.setText(f"{model} | {product} | {version}{' (' + build + ')' if build else ''}")
+
+        badges = list(data.get("badges") or [])
+        if not badges:
+            if data.get("error"):
+                badges = ["Error"]
+            elif data.get("product_type") or data.get("udid"):
+                badges = ["Connected"]
+            else:
+                badges = [mode]
+        for badge in badges[:5]:
+            tone = {
+                "Connected": "ok",
+                "Paired": "ok",
+                "Unlocked/Unknown": "ok",
+                "normal": "ok",
+                "Locked": "warn",
+                "Needs Trust": "warn",
+                "recovery": "warn",
+                "dfu": "warn",
+                "Unsupported": "bad",
+                "Error": "bad",
+            }.get(str(badge), "neutral")
+            self.badges.addWidget(pill(str(badge), tone))
+
+        rows = [
+            ("Mode", mode),
+            ("ECID", data.get("ecid") or "Unavailable"),
+            ("UDID", data.get("masked_udid") or data.get("udid") or "Unavailable"),
+            ("Serial", data.get("serial_number") or "Unavailable"),
+            ("USB", data.get("usb_location") or data.get("location") or "Unavailable"),
+            ("Board", data.get("hardware_model") or data.get("board_config") or data.get("model_identifier") or "Unavailable"),
+            ("Chip", data.get("chip_id") or data.get("chip_family") or data.get("architecture") or "Unavailable"),
+            ("Trust", data.get("pairing_status") or data.get("lock_status") or "Unknown"),
+        ]
+        for index, (label, value) in enumerate(rows):
+            block = QFrame()
+            block.setObjectName("MetricBlock")
+            block_layout = QVBoxLayout(block)
+            block_layout.setContentsMargins(10, 8, 10, 8)
+            block_layout.setSpacing(2)
+            key = QLabel(label)
+            key.setObjectName("MetricLabel")
+            val = QLabel(str(value))
+            val.setObjectName("MetricValue")
+            val.setWordWrap(True)
+            block_layout.addWidget(key)
+            block_layout.addWidget(val)
+            self.metrics.addWidget(block, index // 3, index % 3)
+
+
 class MainWindow(QMainWindow):
     nav_items = [
         "Dashboard",
-        "Device / Target",
-        "iOS Device Viewer",
+        "Connected Device",
         "Firmware / IPSW",
-        "Restore Research / Dry Run",
-        "Restore Methods",
-        "External Tools",
-        "palera1n",
-        "Turdus Merula",
-        "Contents Requirements",
+        "Restore Options",
+        "Restore",
+        "Signing Simulator",
+        "Purple Restore",
+        "Downgrade",
+        "Apps / Install",
         "Logs",
+        "Tools",
         "Settings",
         "About",
     ]
@@ -391,21 +515,16 @@ class MainWindow(QMainWindow):
         self.contents_requirements: dict[str, Any] | None = None
         self.external_tools: dict[str, Any] | None = None
         self.shsh_inspection: dict[str, Any] | None = None
-        self.palera1n_toolchain: dict[str, Any] | None = None
-        self.palera1n_device: dict[str, Any] | None = None
-        self.palera1n_preflight: dict[str, Any] | None = None
-        self.palera1n_plan: dict[str, Any] | None = None
-        self.palera1n_session_dir: str | None = None
-        self.tm_toolchain: dict[str, Any] | None = None
-        self.tm_device: dict[str, Any] | None = None
-        self.tm_ipsw: dict[str, Any] | None = None
-        self.tm_preflight: dict[str, Any] | None = None
-        self.tm_plan: dict[str, Any] | None = None
-        self.tm_session_dir: str | None = None
-        self.tm_artifact_paths: dict[str, QLineEdit] = {}
-        self.tm_artifacts: dict[str, Any] | None = None
+        self.tools_inventory: dict[str, Any] | None = None
+        self.tool_analysis: dict[str, Any] | None = None
+        self.tool_diagnostics: dict[str, Any] | None = None
+        self.downgrade_plan: dict[str, Any] | None = None
+        self.install_plan: dict[str, Any] | None = None
+        self.restore_options: dict[str, Any] | None = None
+        self.mock_signing_response: dict[str, Any] | None = None
+        self.purple_session: dict[str, Any] | None = None
 
-        self.setWindowTitle("iPS-UU Restore Research")
+        self.setWindowTitle("iPS-UU Device Servicing Workspace")
         icon = app_icon()
         if not icon.isNull():
             self.setWindowIcon(icon)
@@ -432,7 +551,7 @@ class MainWindow(QMainWindow):
         side_layout.setContentsMargins(18, 18, 18, 18)
         title = QLabel("iPS-UU")
         title.setObjectName("AppTitle")
-        subtitle = QLabel("Signed restore research console")
+        subtitle = QLabel("Professional IPSW matters.")
         subtitle.setObjectName("SidebarSubtitle")
         side_layout.addWidget(title)
         side_layout.addWidget(subtitle)
@@ -447,7 +566,7 @@ class MainWindow(QMainWindow):
             self.nav.addItem(nav_item)
         self.nav.currentRowChanged.connect(self.switch_page)
         side_layout.addWidget(self.nav, 1)
-        self.status_pill = pill("Dry-run only", "ok")
+        self.status_pill = pill("Wrapper mode", "ok")
         side_layout.addWidget(self.status_pill)
         layout.addWidget(sidebar)
 
@@ -459,7 +578,7 @@ class MainWindow(QMainWindow):
         head_text = QVBoxLayout()
         self.page_title = QLabel("Dashboard")
         self.page_title.setObjectName("PageTitle")
-        self.page_subtitle = QLabel("Monitor target state, firmware metadata, and safe restore preflight.")
+        self.page_subtitle = QLabel("Professional firmware control for researchers, technicians, and device owners.")
         self.page_subtitle.setObjectName("Muted")
         head_text.addWidget(self.page_title)
         head_text.addWidget(self.page_subtitle)
@@ -477,15 +596,15 @@ class MainWindow(QMainWindow):
 
         self.pages.addWidget(scrollable_page(self.dashboard_page()))
         self.pages.addWidget(scrollable_page(self.device_page()))
-        self.pages.addWidget(scrollable_page(self.ios_device_viewer_page()))
         self.pages.addWidget(scrollable_page(self.firmware_page()))
+        self.pages.addWidget(scrollable_page(self.restore_options_page()))
         self.pages.addWidget(scrollable_page(self.restore_page()))
-        self.pages.addWidget(scrollable_page(self.methods_page()))
-        self.pages.addWidget(scrollable_page(self.external_tools_page()))
-        self.pages.addWidget(scrollable_page(self.palera1n_page()))
-        self.pages.addWidget(scrollable_page(self.turdus_merula_page()))
-        self.pages.addWidget(scrollable_page(self.contents_requirements_page()))
+        self.pages.addWidget(scrollable_page(self.signing_simulator_page()))
+        self.pages.addWidget(scrollable_page(self.purple_restore_page()))
+        self.pages.addWidget(scrollable_page(self.downgrade_page()))
+        self.pages.addWidget(scrollable_page(self.apps_install_page()))
         self.pages.addWidget(self.logs_page())
+        self.pages.addWidget(scrollable_page(self.tools_page()))
         self.pages.addWidget(scrollable_page(self.settings_page()))
         self.pages.addWidget(scrollable_page(self.about_page()))
         self.nav.setCurrentRow(0)
@@ -494,11 +613,11 @@ class MainWindow(QMainWindow):
         page = QWidget()
         layout = QGridLayout(page)
         layout.setSpacing(14)
-        self.card_status = Card("Tool Status", "Ready", "Dry-run mode is enabled by default.")
-        self.card_device = Card("Detected Device", "No device detected", "Use Device / Target to refresh.")
+        self.card_status = Card("Tool Status", "Ready", "Bundled tools are external backends.")
+        self.card_device = Card("Detected Device", "No device detected", "Use Connected Device to refresh.")
         self.card_firmware = Card("Selected Firmware", "No IPSW selected", "Use Firmware / IPSW to choose a bundle.")
-        self.card_signing = Card("Signing / Compatibility", "Not checked", "Run a dry check after selecting firmware.")
-        self.card_dryrun = Card("Latest Dry-Run Result", "No dry-run yet", "The restore plan will appear after preflight.")
+        self.card_signing = Card("Compatibility", "Not checked", "Run compatibility or dry-run checks before execution.")
+        self.card_dryrun = Card("Latest Command Plan", "No plan yet", "Backend command previews and logs appear in workflow tabs.")
         layout.addWidget(self.card_status, 0, 0)
         layout.addWidget(self.card_device, 0, 1)
         layout.addWidget(self.card_firmware, 1, 0)
@@ -509,17 +628,86 @@ class MainWindow(QMainWindow):
     def device_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
+        summary = QLabel(
+            "Connected-device metadata is read through public libimobiledevice-style utilities. "
+            "Use this view to verify mode, ProductType, firmware, ECID, pairing, recovery state, and detailed hardware statistics before restore, recovery, or app-install workflows."
+        )
+        summary.setObjectName("Muted")
+        summary.setWordWrap(True)
+        layout.addWidget(summary)
         actions = QHBoxLayout()
         self.refresh_device_btn = QPushButton("Refresh Device")
-        self.refresh_device_btn.clicked.connect(self.refresh_device)
+        self.refresh_device_btn.clicked.connect(self.refresh_connected_device)
+        viewer = QPushButton("Refresh Detailed Viewer")
+        viewer.clicked.connect(self.refresh_ios_device_viewer)
         actions.addWidget(self.refresh_device_btn)
+        actions.addWidget(viewer)
         actions.addStretch(1)
         layout.addLayout(actions)
+        device_actions = QHBoxLayout()
+        restart = QPushButton("Restart")
+        restart.clicked.connect(lambda: self.run_ios_device_action("restart"))
+        shutdown = QPushButton("Shutdown")
+        shutdown.clicked.connect(lambda: self.run_ios_device_action("shutdown"))
+        enter_recovery = QPushButton("Recovery Mode")
+        enter_recovery.clicked.connect(lambda: self.run_ios_device_action("enter_recovery"))
+        exit_recovery = QPushButton("Exit Recovery")
+        exit_recovery.clicked.connect(lambda: self.run_ios_device_action("exit_recovery"))
+        dfu = QPushButton("DFU Instructions")
+        dfu.clicked.connect(self.show_dfu_instructions)
+        for button in (restart, shutdown, enter_recovery, exit_recovery, dfu):
+            device_actions.addWidget(button)
+        device_actions.addStretch(1)
+        layout.addLayout(device_actions)
         self.device_empty = QLabel("No device detected")
         self.device_empty.setObjectName("EmptyState")
         layout.addWidget(self.device_empty)
+        self.connected_device_header = DeviceHeaderPanel()
+        layout.addWidget(self.connected_device_header)
+        body = QHBoxLayout()
+        details = QVBoxLayout()
         self.device_grid = QGridLayout()
-        layout.addLayout(self.device_grid)
+        details.addLayout(self.device_grid)
+        self.connected_verbose_grid = QGridLayout()
+        details.addLayout(self.connected_verbose_grid)
+        details.addWidget(QLabel("Device Diagnostics"))
+        self.device_diagnostics_output = QTextEdit()
+        self.device_diagnostics_output.setReadOnly(True)
+        self.device_diagnostics_output.setPlaceholderText("Detection commands, stdout/stderr, USB entries, and recommended fixes appear here.")
+        details.addWidget(self.device_diagnostics_output, 1)
+        body.addLayout(details, 3)
+        preview_panel = QFrame()
+        preview_panel.setObjectName("Panel")
+        preview_layout = QVBoxLayout(preview_panel)
+        preview_layout.addWidget(QLabel("Screen Preview"))
+        self.connected_screen_preview = QLabel("Refresh Detailed Viewer to capture the screen with idevicescreenshot.")
+        self.connected_screen_preview.setObjectName("EmptyState")
+        self.connected_screen_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.connected_screen_preview.setMinimumSize(240, 420)
+        self.connected_screen_preview.setWordWrap(True)
+        preview_layout.addWidget(self.connected_screen_preview, 1)
+        self.connected_screen_status = QLabel("Preview requires a trusted normal-mode device and bundled idevicescreenshot.")
+        self.connected_screen_status.setObjectName("Muted")
+        self.connected_screen_status.setWordWrap(True)
+        preview_layout.addWidget(self.connected_screen_status)
+        preview_layout.addWidget(QLabel("Device Imagery"))
+        self.connected_device_visual = DevicePreviewWidget()
+        preview_layout.addWidget(self.connected_device_visual, 1)
+        body.addWidget(preview_panel, 1)
+        layout.addLayout(body)
+        dfu_panel = QFrame()
+        dfu_panel.setObjectName("Panel")
+        dfu_layout = QVBoxLayout(dfu_panel)
+        dfu_layout.addWidget(QLabel("DFU Mode Reference"))
+        self.connected_dfu_text = QLabel(self.dfu_instruction_text())
+        self.connected_dfu_text.setObjectName("Muted")
+        self.connected_dfu_text.setWordWrap(True)
+        dfu_layout.addWidget(self.connected_dfu_text)
+        layout.addWidget(dfu_panel)
+        self.connected_viewer_output = QTextEdit()
+        self.connected_viewer_output.setReadOnly(True)
+        self.connected_viewer_output.setPlaceholderText("Detailed connected-device diagnostics appear here.")
+        layout.addWidget(self.connected_viewer_output, 1)
         layout.addStretch(1)
         return page
 
@@ -566,6 +754,8 @@ class MainWindow(QMainWindow):
         body.addLayout(left, 1)
 
         right = QVBoxLayout()
+        self.ios_device_header = DeviceHeaderPanel()
+        right.addWidget(self.ios_device_header)
         self.ios_status_badges = QHBoxLayout()
         right.addLayout(self.ios_status_badges)
         self.ios_device_detail_grid = QGridLayout()
@@ -621,9 +811,82 @@ class MainWindow(QMainWindow):
         layout.addStretch(1)
         return page
 
+    def restore_options_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        summary = QLabel(
+            "NovaCerts Restore Options shows standard signed restore paths for the connected device, "
+            "checks selected IPSWs, and lists bundled external research backends without bypassing Apple signing."
+        )
+        summary.setObjectName("Muted")
+        summary.setWordWrap(True)
+        layout.addWidget(summary)
+
+        picker = QHBoxLayout()
+        self.restore_options_ipsw_path = QLineEdit(self.settings_data.last_ipsw)
+        self.restore_options_ipsw_path.setPlaceholderText("Optional IPSW for compatibility/signing check")
+        browse = QPushButton("Browse IPSW")
+        browse.clicked.connect(self.pick_restore_options_ipsw)
+        refresh = QPushButton("Refresh Restore Options")
+        refresh.setObjectName("PrimaryButton")
+        refresh.clicked.connect(self.refresh_restore_options)
+        picker.addWidget(self.restore_options_ipsw_path, 1)
+        picker.addWidget(browse)
+        picker.addWidget(refresh)
+        layout.addLayout(picker)
+
+        doc_picker = QHBoxLayout()
+        self.restore_options_doc_path = QLineEdit("")
+        self.restore_options_doc_path.setPlaceholderText("Optional Purple Restore .pr / PRKit / Classic PR2 / restore-options plist")
+        browse_doc = QPushButton("Browse Restore Doc")
+        browse_doc.clicked.connect(self.pick_restore_options_doc)
+        doc_picker.addWidget(self.restore_options_doc_path, 1)
+        doc_picker.addWidget(browse_doc)
+        layout.addLayout(doc_picker)
+
+        self.restore_options_status = QLabel("Select an IPSW or refresh to inspect current signed restore paths.")
+        self.restore_options_status.setObjectName("Muted")
+        self.restore_options_status.setWordWrap(True)
+        layout.addWidget(self.restore_options_status)
+
+        self.restore_options_device_grid = QGridLayout()
+        layout.addLayout(self.restore_options_device_grid)
+        self.restore_options_paths_grid = QGridLayout()
+        layout.addLayout(self.restore_options_paths_grid)
+
+        guidance = QFrame()
+        guidance.setObjectName("Panel")
+        guidance_layout = QVBoxLayout(guidance)
+        guidance_layout.addWidget(QLabel("Restore Without Updating"))
+        for text in (
+            "If the installed iOS is still signed, reinstalling that same version may be possible.",
+            "If the version is no longer signed, a standard restore will normally update to a currently signed version.",
+            "User data reset may be possible through device settings, but this is not the same as reinstalling firmware.",
+            "Recovery restore normally requires signed firmware.",
+        ):
+            label = QLabel(text)
+            label.setObjectName("Muted")
+            label.setWordWrap(True)
+            guidance_layout.addWidget(label)
+        layout.addWidget(guidance)
+
+        self.restore_options_backend_grid = QGridLayout()
+        layout.addLayout(self.restore_options_backend_grid)
+        self.restore_options_output = QTextEdit()
+        self.restore_options_output.setReadOnly(True)
+        self.restore_options_output.setPlaceholderText("Restore option analysis, firmware status, command previews, dry-run plans, and session log paths appear here.")
+        layout.addWidget(self.restore_options_output, 1)
+        return page
+
     def restore_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
+        summary = QLabel(
+            "Restore workflows are planned as explicit backend commands. iPS-UU does not pretend idevicerestore, cfgutil, or future tools are proprietary app logic."
+        )
+        summary.setObjectName("Muted")
+        summary.setWordWrap(True)
+        layout.addWidget(summary)
         top = QHBoxLayout()
         self.run_dry_btn = QPushButton("Run Dry Check")
         self.run_dry_btn.setObjectName("PrimaryButton")
@@ -631,10 +894,10 @@ class MainWindow(QMainWindow):
         self.restore_action_combo = QComboBox()
         self.restore_action_combo.addItems(["restore", "update"])
         self.restore_action_combo.setToolTip("restore performs an erase install; update preserves data only when the backend and device state support it.")
-        self.execute_btn = QPushButton("Execute Signed Restore")
+        self.execute_btn = QPushButton("Force Signed Flash")
         self.execute_btn.clicked.connect(self.execute_signed_restore)
-        self.execute_btn.setEnabled(not self.settings_data.dry_run_only)
-        self.execute_btn.setToolTip("Requires Dry-run only mode to be disabled in Settings and multiple confirmations.")
+        self.execute_btn.setEnabled(True)
+        self.execute_btn.setToolTip("Run a real signed firmware restore/update through the first usable supported backend after confirmations.")
         top.addWidget(self.run_dry_btn)
         top.addWidget(self.restore_action_combo)
         top.addWidget(self.execute_btn)
@@ -646,6 +909,422 @@ class MainWindow(QMainWindow):
         self.plan_view.setReadOnly(True)
         self.plan_view.setPlaceholderText("Dry-run JSON and safety refusals appear here.")
         layout.addWidget(self.plan_view, 1)
+        return page
+
+    def signing_simulator_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        banner = QLabel(SIMULATION_BANNER)
+        banner.setObjectName("SimulationBanner")
+        banner.setWordWrap(True)
+        layout.addWidget(banner)
+
+        self.signing_simulation_toggle = QCheckBox("Enable local signing simulation mode")
+        self.signing_simulation_toggle.setToolTip("Required for mock signing responses. This never contacts Apple and never authorizes a real restore.")
+        layout.addWidget(self.signing_simulation_toggle)
+
+        form = QGridLayout()
+        self.mock_device_model = QLineEdit((self.device or {}).get("product_type") or "iPhone10,5")
+        self.mock_device_model.setPlaceholderText("Device model, e.g. iPhone10,5")
+        self.mock_ecid = QLineEdit((self.device or {}).get("ecid") or "mock-ecid")
+        self.mock_ecid.setPlaceholderText("ECID placeholder")
+        self.mock_build = QLineEdit((self.ipsw or {}).get("product_build_version") or "20H240")
+        self.mock_build.setPlaceholderText("Target build")
+        self.mock_result_selector = QComboBox()
+        self.mock_result_selector.addItems(["Approved", "Rejected", "Tethered Only", "Expired", "Network Error"])
+        form.addWidget(QLabel("Device Model"), 0, 0)
+        form.addWidget(self.mock_device_model, 0, 1)
+        form.addWidget(QLabel("ECID"), 1, 0)
+        form.addWidget(self.mock_ecid, 1, 1)
+        form.addWidget(QLabel("Target Build"), 2, 0)
+        form.addWidget(self.mock_build, 2, 1)
+        form.addWidget(QLabel("Result"), 3, 0)
+        form.addWidget(self.mock_result_selector, 3, 1)
+        layout.addLayout(form)
+
+        actions = QHBoxLayout()
+        generate = QPushButton("Generate Mock Response")
+        generate.setObjectName("PrimaryButton")
+        generate.clicked.connect(self.generate_mock_signing_response)
+        copy = QPushButton("Copy JSON")
+        copy.clicked.connect(self.copy_mock_signing_json)
+        save = QPushButton("Save Mock Ticket")
+        save.clicked.connect(self.save_mock_signing_ticket)
+        simulate_restore = QPushButton("Simulate Restore/Flash")
+        simulate_restore.clicked.connect(self.simulate_mock_restore_flash)
+        actions.addWidget(generate)
+        actions.addWidget(copy)
+        actions.addWidget(save)
+        actions.addWidget(simulate_restore)
+        actions.addStretch(1)
+        layout.addLayout(actions)
+
+        self.mock_signing_output = QTextEdit()
+        self.mock_signing_output.setReadOnly(True)
+        self.mock_signing_output.setPlaceholderText("Mock signing JSON appears here. Files can only be saved as .mock.json.")
+        layout.addWidget(self.mock_signing_output, 1)
+        return page
+
+    def purple_restore_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        banner = QLabel(PURPLE_SIMULATION_BANNER)
+        banner.setObjectName("SimulationBanner")
+        banner.setWordWrap(True)
+        layout.addWidget(banner)
+
+        intro = QLabel(
+            "This emulator visually mirrors a Purple Restore / Tatsu-style workflow for internal UI testing only. "
+            "It never contacts Apple services, never changes trust state, never creates valid restore artifacts, and never runs restore binaries."
+        )
+        intro.setObjectName("Muted")
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        form = QGridLayout()
+        self.purple_product_type = QLineEdit((self.device or {}).get("product_type") or "iPhone10,5")
+        self.purple_product_type.setPlaceholderText("ProductType, e.g. iPhone10,5")
+        self.purple_ecid = QLineEdit((self.device or {}).get("ecid") or "mock-ecid")
+        self.purple_ecid.setPlaceholderText("ECID placeholder")
+        self.purple_mode = QComboBox()
+        self.purple_mode.addItems(["normal", "recovery", "dfu"])
+        self.purple_ipsw_path = QLineEdit(self.settings_data.last_ipsw)
+        self.purple_ipsw_path.setPlaceholderText("Select IPSW for compatibility check")
+        browse = QPushButton("Browse")
+        browse.clicked.connect(self.pick_purple_ipsw)
+        form.addWidget(QLabel("ProductType"), 0, 0)
+        form.addWidget(self.purple_product_type, 0, 1)
+        form.addWidget(QLabel("ECID"), 1, 0)
+        form.addWidget(self.purple_ecid, 1, 1)
+        form.addWidget(QLabel("Initial Mode"), 2, 0)
+        form.addWidget(self.purple_mode, 2, 1)
+        form.addWidget(QLabel("IPSW"), 3, 0)
+        form.addWidget(self.purple_ipsw_path, 3, 1)
+        form.addWidget(browse, 3, 2)
+        layout.addLayout(form)
+
+        actions = QHBoxLayout()
+        prepare = QPushButton("Prepare Purple Restore")
+        prepare.setObjectName("PrimaryButton")
+        prepare.clicked.connect(self.prepare_purple_restore)
+        ticket = QPushButton("Request Mock Tatsu Ticket")
+        ticket.clicked.connect(self.request_purple_mock_ticket)
+        proceed = QPushButton("Simulate Restore")
+        proceed.clicked.connect(self.run_purple_restore_emulation)
+        copy = QPushButton("Copy JSON")
+        copy.clicked.connect(self.copy_purple_restore_json)
+        actions.addWidget(prepare)
+        actions.addWidget(ticket)
+        actions.addWidget(proceed)
+        actions.addWidget(copy)
+        actions.addStretch(1)
+        layout.addLayout(actions)
+
+        self.purple_state_grid = QGridLayout()
+        for index, state in enumerate(PURPLE_STATES):
+            state_label = QLabel(state)
+            state_label.setObjectName("Muted")
+            state_label.setWordWrap(True)
+            self.purple_state_grid.addWidget(state_label, index // 3, index % 3)
+        layout.addLayout(self.purple_state_grid)
+
+        self.purple_output = QTextEdit()
+        self.purple_output.setReadOnly(True)
+        self.purple_output.setPlaceholderText("Purple Restore emulator session JSON appears here.")
+        layout.addWidget(self.purple_output, 1)
+        return page
+
+    def downgrade_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        summary = QLabel(
+            "Signed firmware downgrade planning for restore/recovery backends. "
+            "Select a device and IPSW, check compatibility and signing expectations, then dry-run before any confirmed restore action."
+        )
+        summary.setObjectName("Muted")
+        summary.setWordWrap(True)
+        layout.addWidget(summary)
+
+        controls = QGridLayout()
+        self.downgrade_device = QComboBox()
+        self.downgrade_device.addItems(["Connected device / auto"])
+        self.downgrade_ipsw_path = QLineEdit(self.settings_data.last_ipsw)
+        self.downgrade_ipsw_path.setPlaceholderText("Choose IPSW for downgrade workflow")
+        browse = QPushButton("Browse")
+        browse.clicked.connect(self.pick_downgrade_ipsw)
+        self.downgrade_backend = QComboBox()
+        self.downgrade_backend.addItems(["idevicerestore", "cfgutil", "future signed-restore backend"])
+        self.downgrade_status = QComboBox()
+        self.downgrade_status.addItems(["standard signed restore", "signature unavailable", "unsupported target"])
+        controls.addWidget(QLabel("Device"), 0, 0)
+        controls.addWidget(self.downgrade_device, 0, 1)
+        controls.addWidget(QLabel("IPSW"), 1, 0)
+        controls.addWidget(self.downgrade_ipsw_path, 1, 1)
+        controls.addWidget(browse, 1, 2)
+        controls.addWidget(QLabel("Backend"), 2, 0)
+        controls.addWidget(self.downgrade_backend, 2, 1)
+        controls.addWidget(QLabel("Restore status"), 3, 0)
+        controls.addWidget(self.downgrade_status, 3, 1)
+        layout.addLayout(controls)
+
+        risk_box = QFrame()
+        risk_box.setObjectName("Panel")
+        risk_layout = QVBoxLayout(risk_box)
+        risk_layout.addWidget(QLabel("Practical Risks"))
+        for text in (
+            "This may erase data.",
+            "This may update the device if the selected firmware is not signed.",
+            "This may affect activation.",
+            "This may void warranty.",
+            "This may fail and require recovery.",
+            "Unsigned firmware is normally refused by Apple restore services.",
+        ):
+            label = QLabel(text)
+            label.setObjectName("Muted")
+            label.setWordWrap(True)
+            risk_layout.addWidget(label)
+        layout.addWidget(risk_box)
+
+        actions = QHBoxLayout()
+        check = QPushButton("Check Compatibility")
+        check.clicked.connect(self.check_downgrade_compatibility)
+        dry = QPushButton("Dry Run")
+        dry.setObjectName("PrimaryButton")
+        dry.clicked.connect(self.run_downgrade_dry_run)
+        execute = QPushButton("Execute After Confirmation")
+        execute.clicked.connect(self.confirm_downgrade_execution)
+        execute.setEnabled(False)
+        actions.addWidget(check)
+        actions.addWidget(dry)
+        actions.addWidget(execute)
+        actions.addStretch(1)
+        layout.addLayout(actions)
+
+        self.downgrade_steps = QVBoxLayout()
+        layout.addLayout(self.downgrade_steps)
+        self.downgrade_output = QTextEdit()
+        self.downgrade_output.setReadOnly(True)
+        self.downgrade_output.setPlaceholderText("Compatibility, command plan, tethered status, and dry-run output appear here.")
+        layout.addWidget(self.downgrade_output, 1)
+        return page
+
+    def jailbreak_boot_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        summary = QLabel(
+            "Wrapper UX for supported bundled jailbreak and boot tools only. iPS-UU does not implement new exploits, rewrite exploit logic, or hide backend commands."
+        )
+        summary.setObjectName("Muted")
+        summary.setWordWrap(True)
+        layout.addWidget(summary)
+        controls = QGridLayout()
+        self.jb_backend = QComboBox()
+        self.jb_backend.addItems(["palera1n", "turdus merula", "future open-source backend"])
+        self.jb_target = QLineEdit()
+        self.jb_target.setPlaceholderText("Connected device / ProductType / UDID")
+        self.jb_required_mode = QLineEdit("DFU or recovery, depending on backend")
+        self.jb_command_preview = QLineEdit()
+        self.jb_command_preview.setReadOnly(True)
+        self.jb_command_preview.setText("tools/palera1n -l")
+        controls.addWidget(QLabel("Target device"), 0, 0)
+        controls.addWidget(self.jb_target, 0, 1)
+        controls.addWidget(QLabel("Required mode"), 1, 0)
+        controls.addWidget(self.jb_required_mode, 1, 1)
+        controls.addWidget(QLabel("Backend selected"), 2, 0)
+        controls.addWidget(self.jb_backend, 2, 1)
+        controls.addWidget(QLabel("Command preview"), 3, 0)
+        controls.addWidget(self.jb_command_preview, 3, 1)
+        layout.addLayout(controls)
+        actions = QHBoxLayout()
+        refresh = QPushButton("Refresh Target")
+        refresh.clicked.connect(self.prepare_jailbreak_boot_plan)
+        dry = QPushButton("Build Command Plan")
+        dry.setObjectName("PrimaryButton")
+        dry.clicked.connect(self.prepare_jailbreak_boot_plan)
+        run_palera1n = QPushButton("Run palera1n -l")
+        run_palera1n.clicked.connect(self.run_palera1n_l_terminal)
+        actions.addWidget(refresh)
+        actions.addWidget(dry)
+        actions.addWidget(run_palera1n)
+        actions.addStretch(1)
+        layout.addLayout(actions)
+        self.jb_output = QTextEdit()
+        self.jb_output.setReadOnly(True)
+        self.jb_output.setObjectName("TerminalOutput")
+        self.jb_output.setPlaceholderText("Live output and success/failure summaries appear here when a supported backend command is run after confirmation.")
+        layout.addWidget(self.jb_output, 1)
+        return page
+
+    def forsake_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        summary = QLabel(
+            "Guided Forsake workflow. The app detects the device first, reads Forsake help/docs/source for reported support, builds dry-run command plans, and logs every session."
+        )
+        summary.setObjectName("Muted")
+        summary.setWordWrap(True)
+        layout.addWidget(summary)
+
+        step1 = QFrame()
+        step1.setObjectName("Panel")
+        step1_layout = QVBoxLayout(step1)
+        step1_layout.addWidget(QLabel("Step 1: Detect Device"))
+        actions = QHBoxLayout()
+        refresh = QPushButton("Refresh Device")
+        refresh.clicked.connect(self.refresh_forsake_device)
+        diagnostics = QPushButton("Run Diagnostics")
+        diagnostics.clicked.connect(self.refresh_forsake_device)
+        copy = QPushButton("Copy Diagnostics")
+        copy.clicked.connect(self.copy_forsake_diagnostics)
+        actions.addWidget(refresh)
+        actions.addWidget(diagnostics)
+        actions.addWidget(copy)
+        actions.addStretch(1)
+        step1_layout.addLayout(actions)
+        self.forsake_device_grid = QGridLayout()
+        step1_layout.addLayout(self.forsake_device_grid)
+        layout.addWidget(step1)
+
+        step2 = QFrame()
+        step2.setObjectName("Panel")
+        step2_layout = QVBoxLayout(step2)
+        step2_layout.addWidget(QLabel("Step 2: Select Firmware / Restore Files"))
+        ipsw_row = QHBoxLayout()
+        self.forsake_ipsw_path = QLineEdit(self.settings_data.last_ipsw)
+        self.forsake_ipsw_path.setPlaceholderText("Optional IPSW")
+        browse_ipsw = QPushButton("Browse IPSW")
+        browse_ipsw.clicked.connect(self.pick_forsake_ipsw)
+        parse_ipsw_btn = QPushButton("Parse IPSW")
+        parse_ipsw_btn.clicked.connect(self.parse_forsake_ipsw)
+        ipsw_row.addWidget(self.forsake_ipsw_path, 1)
+        ipsw_row.addWidget(browse_ipsw)
+        ipsw_row.addWidget(parse_ipsw_btn)
+        step2_layout.addLayout(ipsw_row)
+        files_row = QHBoxLayout()
+        self.forsake_blob_path = QLineEdit()
+        self.forsake_blob_path.setPlaceholderText("SHSH/blob path if Forsake requires it")
+        self.forsake_boot_files_path = QLineEdit()
+        self.forsake_boot_files_path.setPlaceholderText("Boot files folder/file if Forsake requires it")
+        browse_blob = QPushButton("Browse Blob")
+        browse_blob.clicked.connect(lambda: self.pick_forsake_file(self.forsake_blob_path, "Choose SHSH/Blob"))
+        browse_boot = QPushButton("Browse Boot Files")
+        browse_boot.clicked.connect(lambda: self.pick_forsake_file(self.forsake_boot_files_path, "Choose Boot File"))
+        files_row.addWidget(self.forsake_blob_path, 1)
+        files_row.addWidget(browse_blob)
+        files_row.addWidget(self.forsake_boot_files_path, 1)
+        files_row.addWidget(browse_boot)
+        step2_layout.addLayout(files_row)
+        self.forsake_ipsw_grid = QGridLayout()
+        step2_layout.addLayout(self.forsake_ipsw_grid)
+        layout.addWidget(step2)
+
+        step3 = QFrame()
+        step3.setObjectName("Panel")
+        step3_layout = QVBoxLayout(step3)
+        step3_layout.addWidget(QLabel("Step 3: Compatibility Check"))
+        check = QPushButton("Check Compatibility")
+        check.setObjectName("PrimaryButton")
+        check.clicked.connect(self.run_forsake_compatibility)
+        step3_layout.addWidget(check)
+        self.forsake_compat_grid = QGridLayout()
+        step3_layout.addLayout(self.forsake_compat_grid)
+        layout.addWidget(step3)
+
+        step4 = QFrame()
+        step4.setObjectName("Panel")
+        step4_layout = QVBoxLayout(step4)
+        step4_layout.addWidget(QLabel("Step 4: Dry Run"))
+        dry = QPushButton("Build Dry-Run Plan")
+        dry.clicked.connect(self.run_forsake_dry_run)
+        step4_layout.addWidget(dry)
+        self.forsake_plan_output = QTextEdit()
+        self.forsake_plan_output.setReadOnly(True)
+        self.forsake_plan_output.setPlaceholderText("Forsake command plan, working directory, environment, and support metadata appear here.")
+        step4_layout.addWidget(self.forsake_plan_output, 1)
+        layout.addWidget(step4)
+
+        step5 = QFrame()
+        step5.setObjectName("Panel")
+        step5_layout = QVBoxLayout(step5)
+        step5_layout.addWidget(QLabel("Step 5: Execute"))
+        confirm_row = QHBoxLayout()
+        self.forsake_confirm_text = QLineEdit()
+        self.forsake_confirm_text.setPlaceholderText("Type: I UNDERSTAND THIS MAY ERASE MY DEVICE")
+        self.forsake_execute_btn = QPushButton("Execute Forsake")
+        self.forsake_execute_btn.setEnabled(False)
+        self.forsake_execute_btn.clicked.connect(self.execute_forsake_plan)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.cancel_forsake)
+        confirm_row.addWidget(self.forsake_confirm_text, 1)
+        confirm_row.addWidget(self.forsake_execute_btn)
+        confirm_row.addWidget(cancel)
+        step5_layout.addLayout(confirm_row)
+        self.forsake_output = QTextEdit()
+        self.forsake_output.setReadOnly(True)
+        self.forsake_output.setObjectName("TerminalOutput")
+        self.forsake_output.setPlaceholderText("Forsake stdout/stderr stream and session summary appear here.")
+        step5_layout.addWidget(self.forsake_output, 1)
+        layout.addWidget(step5)
+        return page
+
+    def apps_install_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        summary = QLabel("App install workflows use ideviceinstaller as an external backend on trusted, user-controlled devices.")
+        summary.setObjectName("Muted")
+        summary.setWordWrap(True)
+        layout.addWidget(summary)
+        row = QHBoxLayout()
+        self.ipa_path = QLineEdit()
+        self.ipa_path.setPlaceholderText("Choose IPA")
+        browse = QPushButton("Browse")
+        browse.clicked.connect(self.pick_ipa)
+        plan = QPushButton("Build Install Plan")
+        plan.setObjectName("PrimaryButton")
+        plan.clicked.connect(self.build_app_install_plan)
+        row.addWidget(self.ipa_path, 1)
+        row.addWidget(browse)
+        row.addWidget(plan)
+        layout.addLayout(row)
+        self.apps_install_output = QTextEdit()
+        self.apps_install_output.setReadOnly(True)
+        self.apps_install_output.setPlaceholderText("ideviceinstaller command plan appears here.")
+        layout.addWidget(self.apps_install_output, 1)
+        return page
+
+    def tools_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        summary = QLabel(
+            "Bundled tools are external open-source backends. iPS-UU discovers tools in tools/, shows versions/status, builds command plans, streams output, and exports logs."
+        )
+        summary.setObjectName("Muted")
+        summary.setWordWrap(True)
+        layout.addWidget(summary)
+        actions = QHBoxLayout()
+        refresh = QPushButton("Refresh Tools")
+        refresh.clicked.connect(self.refresh_tool_inventory)
+        diagnostics = QPushButton("Run Diagnostics")
+        diagnostics.clicked.connect(self.run_selected_tool_diagnostics)
+        inspect = QPushButton("Backend Inspector")
+        inspect.clicked.connect(self.run_backend_inspector)
+        open_folder = QPushButton("Open Tool Folder")
+        open_folder.clicked.connect(self.open_selected_tool_folder)
+        actions.addWidget(refresh)
+        actions.addWidget(diagnostics)
+        actions.addWidget(inspect)
+        actions.addWidget(open_folder)
+        actions.addStretch(1)
+        layout.addLayout(actions)
+        self.tools_list = QListWidget()
+        self.tools_list.currentRowChanged.connect(self.render_selected_tool)
+        layout.addWidget(self.tools_list)
+        self.tools_grid = QGridLayout()
+        layout.addLayout(self.tools_grid)
+        self.tools_output = QTextEdit()
+        self.tools_output.setReadOnly(True)
+        self.tools_output.setPlaceholderText("Tool inventory, diagnostics, and open-source Backend Inspector output appear here.")
+        layout.addWidget(self.tools_output, 1)
         return page
 
     def methods_page(self) -> QWidget:
@@ -834,8 +1513,8 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(page)
         summary = QLabel(
             "Guided Turdus Merula workflow wrapper for tethered A9(X)/A10(X) restore research. "
-            "iPS-UU treats pwnDFU/exploit work as a manual external prerequisite, then performs passive discovery, "
-            "compatibility checks, file validation, and session logging."
+            "iPS-UU discovers the bundled external toolchain, builds the iOS Guide command sequence, previews every "
+            "command, opens selected steps in Terminal, and records diagnostics without hiding backend behavior."
         )
         summary.setObjectName("Muted")
         summary.setWordWrap(True)
@@ -871,10 +1550,10 @@ class MainWindow(QMainWindow):
         prerequisite_layout.addWidget(QLabel("Manual Prerequisite Checklist"))
         for text in (
             "1. Connect device",
-            "2. Manually complete required external prerequisite outside this app",
-            "3. Return to app",
-            "4. App verifies device state",
-            "5. Continue restore/preparation workflow",
+            "2. Trust the Mac from the device when normal mode is available",
+            "3. Enter Recovery mode",
+            "4. Build the guide workflow for your detected A9(X) or A10(X) device",
+            "5. Run each selected Terminal step in order and follow Turdus Merula prompts",
         ):
             item = QLabel(text)
             item.setObjectName("Muted")
@@ -913,8 +1592,12 @@ class MainWindow(QMainWindow):
         artifacts_layout.addWidget(QLabel("Optional User-Supplied Artifacts"))
         for key, label, placeholder in (
             ("shsh_blob", "SHSH/APTicket blob", "Optional .shsh/.shsh2/.bshsh2 path"),
-            ("baseband_blob", "Baseband blob", "Optional baseband-related blob path"),
-            ("restore_manifest", "Restore manifest", "Optional manifest/plist path"),
+            ("shcblock", "A9 pre-restore shcblock", "A9 only: shcblock from pre-restore step"),
+            ("post_shcblock", "A9 post-restore shcblock", "A9 only: shcblock from post-restore step"),
+            ("pteblock", "A9 pteblock", "A9 only: pteblock used for tethered boot"),
+            ("iboot_img4", "A10 iBoot.img4", "A10(X): image4/iBoot.img4"),
+            ("signed_sep_img4", "signed-SEP.img4", "A10/A9: image4/signed-SEP.img4"),
+            ("target_sep_im4p", "target-SEP.im4p", "A10(X): image4/target-SEP.im4p"),
         ):
             row = QHBoxLayout()
             row.addWidget(QLabel(label))
@@ -933,8 +1616,8 @@ class MainWindow(QMainWindow):
         layout.addWidget(artifacts)
 
         dfu = QLabel(
-            "Manual prerequisite: complete any required DFU/recovery or other external state transition outside iPS-UU. "
-            "Then return here and refresh device mode. The workflow will only continue when DFU or recovery is already detected."
+            "Turdus Merula and turdusra1n run as external backend commands. Recovery and DFU transitions still happen in the "
+            "Terminal prompts; refresh device mode here whenever the guide asks you to confirm the device state."
         )
         dfu.setObjectName("Muted")
         dfu.setWordWrap(True)
@@ -943,16 +1626,23 @@ class MainWindow(QMainWindow):
         run_row = QHBoxLayout()
         preflight = QPushButton("Run Preflight")
         preflight.clicked.connect(self.run_turdus_preflight)
+        guide_plan = QPushButton("Build Guide Workflow")
+        guide_plan.setObjectName("PrimaryButton")
+        guide_plan.clicked.connect(self.build_turdus_guide_workflow)
+        open_step = QPushButton("Open Selected Step in Terminal")
+        open_step.clicked.connect(self.open_turdus_step_terminal)
         dry_run = QPushButton("Run Preflight / Dry Run")
-        dry_run.setObjectName("PrimaryButton")
         dry_run.clicked.connect(self.run_turdus_dry_run)
-        self.tm_execute_btn = QPushButton("Execution Disabled")
+        self.tm_execute_btn = QPushButton("Use Selected Terminal Step")
+        self.tm_execute_btn.clicked.connect(self.open_turdus_step_terminal)
         self.tm_execute_btn.setEnabled(False)
         copy = QPushButton("Copy Diagnostics")
         copy.clicked.connect(self.copy_turdus_diagnostics)
         export = QPushButton("Export Session Log")
         export.clicked.connect(self.export_turdus_session_log)
         run_row.addWidget(preflight)
+        run_row.addWidget(guide_plan)
+        run_row.addWidget(open_step)
         run_row.addWidget(dry_run)
         run_row.addWidget(self.tm_execute_btn)
         run_row.addWidget(copy)
@@ -962,6 +1652,9 @@ class MainWindow(QMainWindow):
 
         self.tm_preflight_layout = QVBoxLayout()
         layout.addLayout(self.tm_preflight_layout)
+        layout.addWidget(QLabel("Guide Workflow Steps"))
+        self.tm_step_list = QListWidget()
+        layout.addWidget(self.tm_step_list)
         self.tm_output = QTextEdit()
         self.tm_output.setReadOnly(True)
         self.tm_output.setPlaceholderText("Manual prerequisite status, passive checks, and dry-run plan appear here.")
@@ -1063,13 +1756,11 @@ class MainWindow(QMainWindow):
         about.setReadOnly(True)
         about.setHtml(
             f"""
-            <h2>iPS-UU Restore Research</h2>
+            <h2>iPS-UU Device Servicing Workspace</h2>
             <p>Version {__version__}</p>
-            <p>iPS-UU helps inspect IPSW firmware and plan lawful Apple-signed restore dry-runs.</p>
-            <p><b>Safety statement:</b> this tool does not support unsigned downgrades, signing bypasses,
-            SEP/baseband bypasses, APNonce manipulation, exploit chains, pwned DFU, firmware patching,
-            ticket patching, or private entitlement abuse.</p>
-            <p>Credits: local research and Python implementation in this repository.</p>
+            <p><b>One professional workspace for iOS servicing and research.</b></p>
+            <p>This application is a professional device servicing and research interface for iOS restore, recovery, signed downgrade analysis, app install, firmware inspection, and detailed device statistics. You are responsible for your device, data, warranty status, carrier obligations, and compliance with local law.</p>
+            <p>Bundled open-source tools are treated as external backends. iPS-UU shows tool paths, versions, command plans, output, logs, architecture readiness, and practical risks instead of presenting backend behavior as proprietary app logic.</p>
             """
         )
         layout.addWidget(about)
@@ -1077,14 +1768,10 @@ class MainWindow(QMainWindow):
 
     def load_initial_state(self) -> None:
         LOGGER.info("GUI started")
-        self.render_methods()
         self.start_worker("inventory", backend_inventory)
         self.refresh_ios_device_viewer()
         self.device_viewer_timer.start()
-        self.refresh_external_tools()
-        self.refresh_palera1n_toolchain()
-        self.refresh_contents_requirements()
-        self.refresh_turdus_tools()
+        self.refresh_tool_inventory()
         if self.settings_data.last_ipsw:
             QTimer.singleShot(200, self.parse_selected_ipsw)
 
@@ -1092,31 +1779,38 @@ class MainWindow(QMainWindow):
         self.pages.setCurrentIndex(index)
         self.page_title.setText(self.nav_items[index])
         subtitles = {
-            0: "Monitor target state, firmware metadata, and safe restore preflight.",
-            1: "Detect connected devices and restorable modes.",
-            2: "View connected iOS/iPadOS device identity, trust, and pairing status.",
-            3: "Inspect IPSW metadata before any restore planning.",
-            4: "Run non-destructive restore research preflight.",
-            5: "Review observed restore methods and their safety status.",
-            6: "Inventory optional external tools without launching them.",
-            7: "Document palera1n external prerequisites without launching them.",
-            8: "Guided Turdus Merula preflight and dry-run workflow.",
-            9: "Review extracted Contents requirements and implementation status.",
-            10: "Review structured activity logs.",
-            11: "Configure paths, logging, and dry-run policy.",
+            0: "Professional firmware control for researchers, technicians, and device owners.",
+            1: "Detect connected devices, trust state, identifiers, and recovery/DFU mode.",
+            2: "Inspect IPSW metadata before restore, downgrade, or boot planning.",
+            3: "Show standard signed restore paths, selected-IPSW status, backend support, and session logs.",
+            4: "Plan and execute restore/update workflows through external backends.",
+            5: "Local-only mock signing states for UI testing; never valid for real restore.",
+            6: "Internal-only Purple Restore/Tatsu UI emulator with no real restore authority.",
+            7: "Signed firmware downgrade planning with compatibility, signing expectations, risks, dry-run, and confirmation.",
+            8: "Install IPA files through ideviceinstaller on trusted user-controlled devices.",
+            9: "Review structured activity logs and export session records.",
+            10: "Discover bundled flashing, recovery, app-install, and diagnostic tools.",
+            11: "Configure paths, logging, and execution policy.",
             12: "Purpose, safety, version, and credits.",
         }
         self.page_subtitle.setText(subtitles.get(index, ""))
 
     def start_worker(self, name: str, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> None:
         worker = TaskWorker(name, fn, *args, **kwargs)
+        if worker.kwargs.pop("_stream_to_ui", False):
+            worker.kwargs["callback"] = lambda stream, line, worker=worker: worker.signals.stream.emit(worker.name, stream, line)
         worker.setAutoDelete(False)
         worker.signals.started.connect(self.task_started)
+        worker.signals.stream.connect(self.task_stream)
         worker.signals.result.connect(self.task_result)
         worker.signals.error.connect(self.task_error)
         worker.signals.finished.connect(self.task_finished)
         self.active_workers.append(worker)
         self.thread_pool.start(worker)
+
+    def task_stream(self, name: str, stream: str, line: str) -> None:
+        if name == "forsake_execute" and hasattr(self, "forsake_output"):
+            self.forsake_output.append(f"[{stream}] {line}")
 
     def task_started(self, name: str) -> None:
         self.global_progress.setRange(0, 0)
@@ -1141,7 +1835,11 @@ class MainWindow(QMainWindow):
             self.render_device()
         elif name == "ios_device_viewer":
             self.device_viewer = result if isinstance(result, dict) else None
-            self.render_ios_device_viewer()
+            if hasattr(self, "connected_viewer_output"):
+                self.connected_viewer_output.setPlainText(json.dumps(self.device_viewer or {}, indent=2, sort_keys=True))
+                self.render_connected_device_verbose()
+            if hasattr(self, "ios_device_list"):
+                self.render_ios_device_viewer()
         elif name == "ios_device_action":
             if isinstance(result, dict):
                 self.ios_device_viewer_output.setPlainText(json.dumps(result, indent=2, sort_keys=True))
@@ -1208,10 +1906,37 @@ class MainWindow(QMainWindow):
                 self.tm_preflight = result.get("preflight") if isinstance(result.get("preflight"), dict) else self.tm_preflight
                 self.tm_session_dir = result.get("session_dir")
             self.render_turdus()
+        elif name == "tool_inventory":
+            self.tools_inventory = result if isinstance(result, dict) else None
+            self.render_tools_inventory()
+        elif name == "tool_diagnostics":
+            self.tool_diagnostics = result if isinstance(result, dict) else None
+            self.tools_output.setPlainText(json.dumps(self.tool_diagnostics, indent=2, sort_keys=True))
+        elif name == "tool_analysis":
+            self.tool_analysis = result if isinstance(result, dict) else None
+            self.tools_output.setPlainText(json.dumps(self.tool_analysis, indent=2, sort_keys=True))
+        elif name == "restore_options":
+            self.restore_options = result if isinstance(result, dict) else None
+            self.render_restore_options()
+        elif name == "forsake_toolchain":
+            self.forsake_toolchain = result if isinstance(result, dict) else None
+            self.render_forsake()
+        elif name == "forsake_ipsw":
+            self.forsake_ipsw = result if isinstance(result, dict) else None
+            self.render_forsake()
+        elif name == "forsake_execute":
+            if isinstance(result, dict):
+                self.forsake_output.append(json.dumps(result, indent=2, sort_keys=True))
+                self.forsake_session_dir = result.get("session_dir") or self.forsake_session_dir
+            self.render_forsake()
         self.update_dashboard()
 
     def refresh_device(self) -> None:
         self.start_worker("device", detect_target, "auto")
+
+    def refresh_connected_device(self) -> None:
+        self.refresh_device()
+        self.refresh_ios_device_viewer()
 
     def refresh_ios_device_viewer(self) -> None:
         if any(worker.name == "ios_device_viewer" for worker in self.active_workers):
@@ -1219,7 +1944,7 @@ class MainWindow(QMainWindow):
         self.start_worker("ios_device_viewer", load_device_viewer_snapshot)
 
     def auto_refresh_ios_device_viewer(self) -> None:
-        if self.nav.currentRow() == self.nav_items.index("iOS Device Viewer"):
+        if self.nav.currentRow() == self.nav_items.index("Connected Device"):
             self.refresh_ios_device_viewer()
 
     def copy_ios_device_viewer_diagnostics(self) -> None:
@@ -1229,10 +1954,24 @@ class MainWindow(QMainWindow):
 
     def selected_ios_device_udid(self) -> str | None:
         devices = (self.device_viewer or {}).get("devices") or []
-        index = self.ios_device_list.currentRow()
+        index = self.ios_device_list.currentRow() if hasattr(self, "ios_device_list") else -1
         if 0 <= index < len(devices):
             return devices[index].get("udid")
+        if devices:
+            return devices[0].get("udid")
         return None
+
+    def dfu_instruction_text(self) -> str:
+        return (
+            "DFU is a hardware button sequence; the app cannot put a device into DFU for you. "
+            "For Face ID / iPhone 8 or newer: connect USB, quick press Volume Up, quick press Volume Down, hold Side until the screen goes black, then hold Side + Volume Down for 5 seconds, release Side and keep holding Volume Down for about 10 seconds. "
+            "For iPhone 7 / 7 Plus: hold Side + Volume Down for 8 seconds, release Side, keep holding Volume Down for about 10 seconds. "
+            "For Home-button devices: hold Power + Home for 8 seconds, release Power, keep holding Home for about 10 seconds. "
+            "A DFU screen is normally black; use Refresh Device to verify DFU/recovery detection."
+        )
+
+    def show_dfu_instructions(self) -> None:
+        QMessageBox.information(self, "DFU Instructions", self.dfu_instruction_text())
 
     def run_ios_device_action(self, action: str) -> None:
         labels = {
@@ -1253,7 +1992,7 @@ class MainWindow(QMainWindow):
         self.start_worker("ios_device_action", perform_device_action, action, self.selected_ios_device_udid())
 
     def refresh_contents_requirements(self) -> None:
-        self.start_worker("contents_requirements", contents_requirements, Path("Contents"), CONTENTS_RESTORE_METHODS)
+        self.start_worker("contents_requirements", contents_requirements, DEFAULT_CONTENTS_ROOT, CONTENTS_RESTORE_METHODS)
 
     def refresh_external_tools(self) -> None:
         self.start_worker("external_tools", scan_external_tools)
@@ -1383,6 +2122,7 @@ class MainWindow(QMainWindow):
         path, _ = QFileDialog.getOpenFileName(self, "Choose IPSW", str(Path.home()), "IPSW firmware (*.ipsw);;All files (*)")
         if path:
             self.tm_ipsw_path.setText(path)
+            self.tm_guide_workflow = None
             self.parse_turdus_ipsw()
 
     def parse_turdus_ipsw(self) -> None:
@@ -1390,6 +2130,7 @@ class MainWindow(QMainWindow):
         if not path:
             QMessageBox.information(self, "iPS-UU", "Choose an IPSW before parsing.")
             return
+        self.tm_guide_workflow = None
         product = (self.tm_device or self.device or {}).get("product_type")
         self.start_worker("tm_ipsw", inspect_turdus_ipsw, path, product)
 
@@ -1404,6 +2145,7 @@ class MainWindow(QMainWindow):
             return
         path, _ = QFileDialog.getOpenFileName(self, "Choose Artifact", str(Path.home()), "Blob or plist files (*.shsh *.shsh2 *.bshsh2 *.plist);;All files (*)")
         if path:
+            self.tm_guide_workflow = None
             target.setText(path)
             self.turdus_artifacts()
             self.render_turdus()
@@ -1435,6 +2177,39 @@ class MainWindow(QMainWindow):
             return
         self.tm_status.setText("Manual-prerequisite dry-run plan saved to session logs.")
         self.start_worker("tm_dry_run", run_turdus_dry_run, plan, self.tm_preflight)
+
+    def build_turdus_guide_workflow(self) -> None:
+        artifacts = {name: field.text().strip() or None for name, field in self.tm_artifact_paths.items()}
+        self.tm_guide_workflow = build_turdus_guide_workflow(self.tm_device or self.device or {}, self.tm_ipsw or {}, artifacts)
+        self.tm_output.setPlainText(json.dumps(self.tm_guide_workflow, indent=2, sort_keys=True))
+        self.render_turdus()
+
+    def open_turdus_step_terminal(self) -> None:
+        workflow = self.tm_guide_workflow
+        if not workflow:
+            self.build_turdus_guide_workflow()
+            workflow = self.tm_guide_workflow
+        steps = (workflow or {}).get("steps") or []
+        index = self.tm_step_list.currentRow()
+        if not (0 <= index < len(steps)):
+            QMessageBox.information(self, "iPS-UU", "Select a Turdus Merula workflow step first.")
+            return
+        step = steps[index]
+        command = [str(part) for part in (step.get("command") or [])]
+        if any(part.startswith("<") and part.endswith(">") for part in command):
+            QMessageBox.warning(self, "iPS-UU", "This step still has placeholder file paths. Select the required IPSW/artifacts first.")
+            return
+        preview = str(step.get("command_preview") or " ".join(command))
+        confirmation = QMessageBox.question(
+            self,
+            "Run Turdus Merula Step",
+            f"This will open a new Terminal window and run this external backend command:\n\n{preview}\n\n"
+            "This may erase data, require tethered boot, or require recovery if it fails. Continue?",
+        )
+        if confirmation != QMessageBox.StandardButton.Yes:
+            return
+        result = run_turdus_terminal_command(command)
+        self.tm_output.setPlainText(json.dumps({"step": step, "terminal": result}, indent=2, sort_keys=True))
 
     def open_turdus_tools_folder(self) -> None:
         path = Path((self.tm_toolchain or {}).get("root") or "tools").resolve()
@@ -1477,6 +2252,565 @@ class MainWindow(QMainWindow):
         else:
             self.tm_status.setText("Waiting for device in required mode after manual external prerequisite.")
 
+    def pick_restore_options_ipsw(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Choose IPSW", str(Path.home()), "IPSW firmware (*.ipsw);;All files (*)")
+        if path:
+            self.restore_options_ipsw_path.setText(path)
+            self.refresh_restore_options()
+
+    def pick_restore_options_doc(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Choose Restore Document", str(Path.home()), "Restore documents (*.pr *.plist *.zip);;All files (*)")
+        if path:
+            self.restore_options_doc_path.setText(path)
+            self.refresh_restore_options()
+
+    def refresh_restore_options(self) -> None:
+        path = self.restore_options_ipsw_path.text().strip() or None
+        doc_path = self.restore_options_doc_path.text().strip() if hasattr(self, "restore_options_doc_path") else None
+        if path and not Path(path).exists():
+            QMessageBox.warning(self, "iPS-UU", "The selected IPSW does not exist.")
+            return
+        if doc_path and not Path(doc_path).exists():
+            QMessageBox.warning(self, "iPS-UU", "The selected restore document does not exist.")
+            return
+        self.restore_options_status.setText("Checking device, signing metadata, IPSW compatibility, Purple Restore profile, and restore document options...")
+        self.start_worker("restore_options", analyze_restore_options, path, self.device, 10, doc_path or None)
+
+    def render_restore_options(self) -> None:
+        if not hasattr(self, "restore_options_output"):
+            return
+        clear_layout(self.restore_options_device_grid)
+        clear_layout(self.restore_options_paths_grid)
+        clear_layout(self.restore_options_backend_grid)
+        payload = self.restore_options or {}
+        device = payload.get("device_status") or {}
+        fields = [
+            ("ProductType", device.get("product_type") or "Unknown", ""),
+            ("Model", device.get("model") or "Unknown", ""),
+            ("Chip Family", device.get("chip_family") or "Unknown", ""),
+            ("Current iOS", device.get("current_ios_version") or "Unknown", ""),
+            ("Mode", device.get("mode") or "Unknown", "normal, recovery, or DFU"),
+            ("ECID", device.get("ecid") or "Unavailable", ""),
+            ("Serial Number", device.get("serial_number") or "Unavailable", "Classic device browser field"),
+            ("USB Location", device.get("usb_location") or "Unavailable", "Classic device browser field"),
+            ("Board Config", device.get("board_config") or "Unavailable", "BuildManifest/device-map matching"),
+        ]
+        for index, (title, value, detail) in enumerate(fields):
+            self.restore_options_device_grid.addWidget(Card(title, str(value), str(detail)), index // 3, index % 3)
+
+        firmware = payload.get("firmware_check") or {}
+        if firmware:
+            status = str(firmware.get("status") or "Unknown")
+            tone = {
+                "Installable": "ok",
+                "Not installable": "bad",
+                "Unsupported device": "bad",
+                "Signature unavailable": "warn",
+                "Requires external research backend": "warn",
+                "Tethered only": "warn",
+            }.get(status, "neutral")
+            self.restore_options_status.setText(status)
+            self.restore_options_paths_grid.addWidget(pill(status, tone), 0, 0)
+            signature = firmware.get("signature") or {}
+            compatibility = firmware.get("compatibility") or {}
+            self.restore_options_paths_grid.addWidget(
+                Card("Selected IPSW", status, f"{compatibility.get('message') or ''} {signature.get('detail') or ''}".strip()),
+                0,
+                1,
+            )
+        else:
+            self.restore_options_status.setText("Restore paths refreshed. Select an IPSW to check installability.")
+
+        for index, path_info in enumerate(payload.get("available_restore_paths") or []):
+            possible = bool(path_info.get("possible"))
+            title = str(path_info.get("name") or "Restore path")
+            value = str(path_info.get("status") or ("Installable" if possible else "Not installable"))
+            detail = str(path_info.get("command_preview") or path_info.get("guidance") or "")
+            self.restore_options_paths_grid.addWidget(Card(title, value, detail), (index + 1) // 2 + 1, (index + 1) % 2)
+
+        for index, backend in enumerate((payload.get("external_backends") or [])[:6]):
+            detected = "Detected" if backend.get("detected") else "Missing"
+            detail = f"{backend.get('tethered_status')}; {backend.get('supported_ios_versions')}"
+            self.restore_options_backend_grid.addWidget(Card(str(backend.get("tool_name") or "Backend"), detected, detail), index // 3, index % 3)
+
+        purple = payload.get("purple_restore_internal") or {}
+        offset = len((payload.get("external_backends") or [])[:6])
+        for index, backend in enumerate(purple.get("executor_candidates") or []):
+            state = "Enabled" if backend.get("enabled") else "Available" if backend.get("available") else "Missing"
+            detail = "; ".join(str(item) for item in backend.get("requires") or []) or str(backend.get("value") or "")
+            self.restore_options_backend_grid.addWidget(Card(str(backend.get("name") or backend.get("id")), state, detail), (offset + index) // 3, (offset + index) % 3)
+
+        restore_doc = payload.get("restore_document")
+        if restore_doc:
+            value = str(restore_doc.get("status") or "Unknown")
+            detail = f"{restore_doc.get('match_count', 0)} restore option set(s) found"
+            if restore_doc.get("error"):
+                detail = str(restore_doc.get("error"))
+            self.restore_options_backend_grid.addWidget(Card("Restore Document", value, detail), (offset + len(purple.get("executor_candidates") or [])) // 3 + 1, 0)
+
+        classic = payload.get("purple_restore_classic") or {}
+        if classic:
+            schema = classic.get("pr2_schema") or {}
+            state = "Modeled" if classic.get("available") else "Unavailable"
+            detail = f"{schema.get('key_path_count', 0)} PR2 key paths; execution backend disabled"
+            self.restore_options_backend_grid.addWidget(Card("PurpleRestore Classic", state, detail), (offset + len(purple.get("executor_candidates") or [])) // 3 + 1, 1)
+
+        downgrade = payload.get("downgrade_preflight") or {}
+        if downgrade:
+            blockers = downgrade.get("blockers") or []
+            warnings = downgrade.get("warnings") or []
+            state = "Blocked" if blockers else "Review" if warnings else "No downgrade target"
+            detail = f"Required mode: {downgrade.get('required_mode')}; force downgrade supported: {downgrade.get('modern_force_downgrade_supported')}"
+            self.restore_options_backend_grid.addWidget(Card("Downgrade Preflight", state, detail), (offset + len(purple.get("executor_candidates") or [])) // 3 + 1, 2)
+            if blockers or warnings:
+                message = "; ".join(str(item) for item in [*blockers[:2], *warnings[:2]])
+                self.restore_options_paths_grid.addWidget(Card("Classic/Legacy Policy", state, message), 0, 2)
+
+        self.restore_options_output.setPlainText(json.dumps(payload, indent=2, sort_keys=True))
+
+    def refresh_tool_inventory(self) -> None:
+        self.start_worker("tool_inventory", discover_tools)
+
+    def selected_tool_name(self) -> str | None:
+        tools = (self.tools_inventory or {}).get("tools") or []
+        if not tools:
+            return None
+        index = self.tools_list.currentRow()
+        if 0 <= index < len(tools):
+            return str(tools[index].get("name") or "")
+        return str(tools[0].get("name") or "")
+
+    def run_selected_tool_diagnostics(self) -> None:
+        name = self.selected_tool_name()
+        if not name:
+            QMessageBox.information(self, "iPS-UU", "Refresh Tools before running diagnostics.")
+            return
+        self.start_worker("tool_diagnostics", run_diagnostics, name)
+
+    def run_backend_inspector(self) -> None:
+        name = self.selected_tool_name()
+        if not name:
+            QMessageBox.information(self, "iPS-UU", "Refresh Tools before using Backend Inspector.")
+            return
+        self.start_worker("tool_analysis", analyze_open_source_tool, name)
+
+    def open_selected_tool_folder(self) -> None:
+        tools = (self.tools_inventory or {}).get("tools") or []
+        index = self.tools_list.currentRow()
+        tool = tools[index] if 0 <= index < len(tools) else (tools[0] if tools else None)
+        path = Path(str((tool or {}).get("path") or "tools"))
+        folder = path if path.is_dir() else path.parent
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder.resolve())))
+
+    def render_tools_inventory(self) -> None:
+        if not hasattr(self, "tools_list"):
+            return
+        current_name = self.selected_tool_name()
+        self.tools_list.clear()
+        for tool in (self.tools_inventory or {}).get("tools") or []:
+            status = "detected" if tool.get("detected") else "missing"
+            item = QListWidgetItem(f"{tool.get('name')} - {status}")
+            item.setData(Qt.ItemDataRole.UserRole, tool.get("name"))
+            self.tools_list.addItem(item)
+            if current_name and current_name == tool.get("name"):
+                self.tools_list.setCurrentItem(item)
+        if self.tools_list.count() and self.tools_list.currentRow() < 0:
+            self.tools_list.setCurrentRow(0)
+        self.render_selected_tool()
+
+    def render_selected_tool(self, _index: int | None = None) -> None:
+        if not hasattr(self, "tools_grid"):
+            return
+        clear_layout(self.tools_grid)
+        tools = (self.tools_inventory or {}).get("tools") or []
+        index = self.tools_list.currentRow() if hasattr(self, "tools_list") else 0
+        tool = tools[index] if 0 <= index < len(tools) else None
+        if not tool:
+            self.tools_output.setPlainText(json.dumps(self.tools_inventory or {}, indent=2, sort_keys=True))
+            return
+        workflow = ", ".join(str(item) for item in tool.get("supported_workflows") or [])
+        families = ", ".join(str(item) for item in tool.get("supported_device_families") or [])
+        architecture_summary = ", ".join(
+            f"{component.get('filename')}:{'/'.join((component.get('architecture') or {}).get('architectures') or ['script' if (component.get('architecture') or {}).get('kind') == 'script' else 'unknown'])}"
+            for component in (tool.get("components") or [])
+        )
+        fields = [
+            Card("Detected", "Yes" if tool.get("detected") else "Missing", "All required components detected" if tool.get("all_required_detected") else "Some components may be missing"),
+            Card("Path", str(tool.get("path") or ""), "Executable" if tool.get("executable") else "Not executable or not present"),
+            Card("Version", str(tool.get("version") or "Unavailable"), "Passive --version/-v style checks only."),
+            Card("Apple Silicon / Intel", "Ready" if tool.get("universal2_ready") else "Check required", architecture_summary or "No executable architecture metadata."),
+            Card("Purpose", str(tool.get("purpose") or ""), workflow),
+            Card("Required Device Mode", str(tool.get("required_device_mode") or "Unknown"), families),
+            Card("Open-Source License", str(tool.get("open_source_license") or "Verify bundled source"), "Shown when LICENSE/COPYING is available."),
+        ]
+        for idx, card in enumerate(fields):
+            self.tools_grid.addWidget(card, idx // 2, idx % 2)
+        self.tools_output.setPlainText(json.dumps(tool, indent=2, sort_keys=True))
+
+    def pick_downgrade_ipsw(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Choose IPSW", str(Path.home()), "IPSW firmware (*.ipsw);;All files (*)")
+        if path:
+            self.downgrade_ipsw_path.setText(path)
+
+    def check_downgrade_compatibility(self) -> None:
+        path = self.downgrade_ipsw_path.text().strip()
+        if not path:
+            QMessageBox.information(self, "iPS-UU", "Choose an IPSW before checking compatibility.")
+            return
+        try:
+            ipsw = parse_ipsw(path, (self.device or {}).get("product_type"))
+            comp = compatibility_summary(self.device, ipsw)
+        except Exception as exc:
+            payload = {"status": "error", "error": str(exc)}
+        else:
+            payload = {"device": self.device, "ipsw": ipsw, "compatibility": comp, "backend": self.downgrade_backend.currentText(), "restore_status": self.downgrade_status.currentText()}
+        self.downgrade_output.setPlainText(json_text(payload))
+
+    def run_downgrade_dry_run(self) -> None:
+        path = self.downgrade_ipsw_path.text().strip()
+        backend = self.downgrade_backend.currentText()
+        if not path:
+            QMessageBox.information(self, "iPS-UU", "Choose an IPSW before dry-run.")
+            return
+        if backend == "idevicerestore":
+            self.downgrade_plan = build_restore_plan(path, erase=True)
+        elif backend == "cfgutil":
+            self.downgrade_plan = {
+                "purpose": "Signed firmware restore planning through Apple Configurator cfgutil.",
+                "backend": backend,
+                "command": ["tools/cfgutil", "restore", "<selected-device>", path],
+                "command_preview": f"tools/cfgutil restore <selected-device> {path}",
+                "device": self.device,
+                "ipsw": path,
+                "restore_status": self.downgrade_status.currentText(),
+                "risks": [
+                    "This may erase data.",
+                    "This may update the device if the selected firmware is not signed.",
+                    "This may affect activation.",
+                    "This may fail and require recovery.",
+                    "Unsigned firmware is normally refused by Apple restore services.",
+                ],
+                "execute_requires_confirmation": True,
+            }
+        else:
+            self.downgrade_plan = {"backend": backend, "status": "future signed-restore backend placeholder", "execute_requires_confirmation": True}
+        self.downgrade_output.setPlainText(json_text(self.downgrade_plan))
+
+    def generate_mock_signing_response(self) -> None:
+        if not self.signing_simulation_toggle.isChecked():
+            QMessageBox.warning(self, "Apple Connect", "Enable local signing simulation mode before generating a mock response.")
+            return
+        status = self.mock_result_selector.currentText()
+        try:
+            response = generate_mock_response(
+                self.mock_device_model.text().strip(),
+                self.mock_ecid.text().strip(),
+                self.mock_build.text().strip(),
+                status,
+                simulation=True,
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "Apple Connect", str(exc))
+            return
+        self.mock_signing_response = response
+        self.mock_signing_output.setPlainText(json_text(response))
+
+    def copy_mock_signing_json(self) -> None:
+        if not self.mock_signing_response:
+            self.generate_mock_signing_response()
+        if self.mock_signing_response:
+            QApplication.clipboard().setText(json_text(self.mock_signing_response))
+            LOGGER.info("mock signing JSON copied")
+
+    def save_mock_signing_ticket(self) -> None:
+        if not self.signing_simulation_toggle.isChecked():
+            QMessageBox.warning(self, "Apple Connect", "Enable local signing simulation mode before saving a mock ticket.")
+            return
+        if not self.mock_signing_response:
+            self.generate_mock_signing_response()
+        if not self.mock_signing_response:
+            return
+        default_name = safe_mock_ticket_name(
+            str(self.mock_signing_response.get("device") or "device"),
+            str(self.mock_signing_response.get("build") or "build"),
+        )
+        target, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Mock Ticket",
+            str(Path.home() / default_name),
+            "Mock JSON tickets (*.mock.json)",
+        )
+        if not target:
+            return
+        try:
+            saved = save_mock_ticket(self.mock_signing_response, target)
+        except Exception as exc:
+            QMessageBox.warning(self, "Apple Connect", str(exc))
+            return
+        self.mock_signing_output.setPlainText(json_text({**self.mock_signing_response, "saved_to": str(saved)}))
+        LOGGER.info("mock signing ticket saved to %s", saved)
+
+    def simulate_mock_restore_flash(self) -> None:
+        if not self.signing_simulation_toggle.isChecked():
+            QMessageBox.warning(self, "Apple Connect", "Enable local signing simulation mode before simulating restore/flash.")
+            return
+        if not self.mock_signing_response:
+            self.generate_mock_signing_response()
+        if not self.mock_signing_response:
+            return
+        try:
+            plan = simulated_restore_flash_plan(self.mock_signing_response, simulation=True)
+        except Exception as exc:
+            QMessageBox.warning(self, "Apple Connect", str(exc))
+            return
+        self.mock_signing_output.setPlainText(json_text(plan))
+
+    def pick_purple_ipsw(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Choose IPSW", str(Path.home()), "IPSW firmware (*.ipsw);;All files (*)")
+        if path:
+            self.purple_ipsw_path.setText(path)
+            self.prepare_purple_restore()
+
+    def prepare_purple_restore(self) -> None:
+        device = {
+            **(self.device or {}),
+            "product_type": self.purple_product_type.text().strip(),
+            "ecid": self.purple_ecid.text().strip() or "mock-ecid",
+            "current_mode": self.purple_mode.currentText(),
+        }
+        try:
+            self.purple_session = build_purple_restore_session(
+                device,
+                self.purple_ipsw_path.text().strip() or None,
+                simulation=True,
+                product_type_override=self.purple_product_type.text().strip() or None,
+                mode_override=self.purple_mode.currentText(),
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "Apple Connect", str(exc))
+            return
+        self.purple_output.setPlainText(json_text(self.purple_session))
+
+    def request_purple_mock_ticket(self) -> None:
+        if not self.purple_session:
+            self.prepare_purple_restore()
+        if not self.purple_session:
+            return
+        try:
+            self.purple_session = request_mock_tatsu_ticket(self.purple_session, simulation=True)
+        except Exception as exc:
+            QMessageBox.warning(self, "Apple Connect", str(exc))
+            return
+        self.purple_output.setPlainText(json_text(self.purple_session))
+
+    def run_purple_restore_emulation(self) -> None:
+        if not self.purple_session:
+            self.prepare_purple_restore()
+        if not self.purple_session:
+            return
+        if not self.purple_session.get("mock_tatsu_ticket"):
+            try:
+                self.purple_session = request_mock_tatsu_ticket(self.purple_session, simulation=True)
+            except Exception as exc:
+                QMessageBox.warning(self, "Apple Connect", str(exc))
+                return
+        try:
+            self.purple_session = run_purple_restore_simulation(self.purple_session, simulation=True, succeed=True)
+        except Exception as exc:
+            QMessageBox.warning(self, "Apple Connect", str(exc))
+            return
+        self.purple_output.setPlainText(json_text(self.purple_session))
+
+    def copy_purple_restore_json(self) -> None:
+        if not self.purple_session:
+            self.prepare_purple_restore()
+        if self.purple_session:
+            QApplication.clipboard().setText(json_text(self.purple_session))
+            LOGGER.info("Purple Restore emulator JSON copied")
+
+    def confirm_downgrade_execution(self) -> None:
+        QMessageBox.information(self, "iPS-UU", "Execution remains gated by backend-specific confirmation and is not enabled from this generic downgrade page.")
+
+    def prepare_jailbreak_boot_plan(self) -> None:
+        device = self.device or {}
+        backend = self.jb_backend.currentText()
+        self.jb_target.setText(str(device.get("product_type") or device.get("udid") or "No connected device"))
+        if backend == "palera1n":
+            plan = build_rootless_launch_plan()
+            command = list(plan.get("command") or ["tools/palera1n", "-l"])
+            mode = "DFU"
+        elif backend == "turdus merula":
+            command = ["tools/turdus_merula", "<backend-supported args selected by user>"]
+            mode = "DFU or recovery"
+        else:
+            command = ["tools/<future-backend>", "<explicit args>"]
+            mode = "backend-defined"
+        preview = " ".join(command)
+        self.jb_required_mode.setText(mode)
+        self.jb_command_preview.setText(preview)
+        self.jailbreak_plan = {
+            "target_device": device,
+            "required_mode": mode,
+            "backend_selected": backend,
+            "command": command,
+            "command_preview": preview,
+            "live_output": "Output streams here only after a supported backend command is confirmed.",
+            "summary": "No new exploits are implemented and no exploit logic is rewritten by iPS-UU.",
+            "risks": [
+                "This may erase data.",
+                "This may require tethered boot.",
+                "This may affect activation.",
+                "This may void warranty.",
+                "This may fail and require recovery.",
+                "Check local law before use.",
+            ],
+        }
+        self.jb_output.setPlainText(json.dumps(self.jailbreak_plan, indent=2, sort_keys=True))
+
+    def run_palera1n_l_terminal(self) -> None:
+        try:
+            result = launch_rootless_in_terminal()
+        except Exception as exc:
+            QMessageBox.warning(self, "iPS-UU", str(exc))
+            return
+        self.jb_command_preview.setText(str(result.get("command_preview") or "tools/palera1n -l"))
+        self.jb_output.setPlainText(json.dumps(result, indent=2, sort_keys=True))
+
+    def pick_ipa(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Choose IPA", str(Path.home()), "iOS app archives (*.ipa);;All files (*)")
+        if path:
+            self.ipa_path.setText(path)
+
+    def build_app_install_plan(self) -> None:
+        path = self.ipa_path.text().strip()
+        if not path:
+            QMessageBox.information(self, "iPS-UU", "Choose an IPA before building an install plan.")
+            return
+        self.install_plan = build_install_plan(path, (self.device or {}).get("udid"))
+        self.apps_install_output.setPlainText(json.dumps(self.install_plan, indent=2, sort_keys=True))
+
+    def refresh_forsake_device(self) -> None:
+        self.refresh_connected_device()
+        self.start_worker("forsake_toolchain", find_forsake_toolchain)
+
+    def pick_forsake_ipsw(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Choose IPSW", str(Path.home()), "IPSW firmware (*.ipsw);;All files (*)")
+        if path:
+            self.forsake_ipsw_path.setText(path)
+            self.parse_forsake_ipsw()
+
+    def pick_forsake_file(self, target: QLineEdit, title: str) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, title, str(Path.home()), "All files (*)")
+        if path:
+            target.setText(path)
+
+    def parse_forsake_ipsw(self) -> None:
+        path = self.forsake_ipsw_path.text().strip()
+        if not path:
+            QMessageBox.information(self, "iPS-UU", "Choose an IPSW before parsing.")
+            return
+        self.start_worker("forsake_ipsw", parse_ipsw, path, (self.device or {}).get("product_type"))
+
+    def forsake_selected_files(self) -> dict[str, str | None]:
+        return {
+            "shsh_blob": self.forsake_blob_path.text().strip() or None,
+            "boot_files": self.forsake_boot_files_path.text().strip() or None,
+        }
+
+    def run_forsake_compatibility(self) -> None:
+        self.forsake_toolchain = find_forsake_toolchain()
+        self.forsake_compatibility = check_forsake_requirements(self.device or {}, self.forsake_ipsw, self.forsake_selected_files())
+        self.render_forsake()
+
+    def run_forsake_dry_run(self) -> None:
+        self.run_forsake_compatibility()
+        self.forsake_plan = build_forsake_dry_run_plan(self.device or {}, self.forsake_ipsw, self.forsake_selected_files())
+        self.forsake_session_dir = str(create_forsake_session_dir())
+        write_forsake_session_inputs(
+            Path(self.forsake_session_dir),
+            self.device or {},
+            self.forsake_toolchain or {},
+            self.forsake_compatibility or {},
+            self.forsake_plan,
+        )
+        self.forsake_plan_output.setPlainText(json.dumps(self.forsake_plan, indent=2, sort_keys=True))
+        self.render_forsake()
+
+    def execute_forsake_plan(self) -> None:
+        if self.forsake_confirm_text.text().strip() != "I UNDERSTAND THIS MAY ERASE MY DEVICE":
+            QMessageBox.warning(self, "iPS-UU", "Type the exact confirmation phrase before executing Forsake.")
+            return
+        if not self.forsake_plan:
+            QMessageBox.warning(self, "iPS-UU", "Build a dry-run plan first.")
+            return
+        self.forsake_output.append("$ " + str(self.forsake_plan.get("command_preview") or ""))
+        self.start_worker("forsake_execute", execute_plan_with_logs, self.forsake_plan, self.forsake_session_dir, _stream_to_ui=True)
+
+    def cancel_forsake(self) -> None:
+        result = cancel_forsake_process()
+        self.forsake_output.append(json.dumps(result, indent=2, sort_keys=True))
+
+    def copy_forsake_diagnostics(self) -> None:
+        payload = {
+            "device": self.device,
+            "toolchain": self.forsake_toolchain,
+            "ipsw": self.forsake_ipsw,
+            "compatibility": self.forsake_compatibility,
+            "plan": self.forsake_plan,
+            "session_dir": self.forsake_session_dir,
+        }
+        QApplication.clipboard().setText(json.dumps(payload, indent=2, sort_keys=True))
+        LOGGER.info("Forsake diagnostics copied")
+
+    def render_forsake(self) -> None:
+        if not hasattr(self, "forsake_device_grid"):
+            return
+        clear_layout(self.forsake_device_grid)
+        clear_layout(self.forsake_ipsw_grid)
+        clear_layout(self.forsake_compat_grid)
+        device = self.device or {}
+        diagnostics = device.get("diagnostics") or {}
+        recommended = diagnostics.get("recommended_fix") or {}
+        device_cards = [
+            Card("ProductType", str(device.get("product_type") or "Unknown"), str(device.get("marketing_name") or "")),
+            Card("Mode", str(device.get("current_mode") or "Unknown"), f"Backend: {device.get('detection_method') or 'none'}"),
+            Card("Chip Family", str(device.get("chip_family") or "Unknown"), str(device.get("board_config") or "")),
+            Card("ECID / CPID / BDID", str(device.get("ecid") or "Unavailable"), f"CPID {device.get('cpid') or 'n/a'} BDID {device.get('bdid') or 'n/a'}"),
+            Card("Diagnostics", str(recommended.get("issue") or "Unknown"), str(recommended.get("recommended_fix") or "")),
+            Card("Tool Commands", "See JSON", "Device diagnostics include stdout/stderr for each backend."),
+        ]
+        for idx, card in enumerate(device_cards):
+            self.forsake_device_grid.addWidget(card, idx // 3, idx % 3)
+        if self.forsake_ipsw:
+            supported = ", ".join(self.forsake_ipsw.get("supported_product_types") or []) or "Unknown"
+            ipsw_cards = [
+                Card("IPSW ProductVersion", str(self.forsake_ipsw.get("product_version") or "Unknown"), ""),
+                Card("IPSW BuildVersion", str(self.forsake_ipsw.get("product_build_version") or "Unknown"), ""),
+                Card("Supported ProductTypes", supported, ""),
+            ]
+            for idx, card in enumerate(ipsw_cards):
+                self.forsake_ipsw_grid.addWidget(card, idx // 3, idx % 3)
+        compatibility = self.forsake_compatibility or check_forsake_requirements(device, self.forsake_ipsw, self.forsake_selected_files())
+        self.forsake_compatibility = compatibility
+        for idx, item in enumerate(compatibility.get("checks") or []):
+            self.forsake_compat_grid.addWidget(
+                Card(str(item.get("label")), "PASS" if item.get("passed") else "FAIL", str(item.get("detail") or "")),
+                idx // 3,
+                idx % 3,
+            )
+        self.forsake_compat_grid.addWidget(Card("Result", str(compatibility.get("status") or "Unknown"), ""), 10, 0)
+        ready = compatibility.get("status") == "Ready" and bool(self.forsake_plan and self.forsake_plan.get("command"))
+        self.forsake_execute_btn.setEnabled(bool(ready))
+        payload = {
+            "device": device,
+            "toolchain": self.forsake_toolchain,
+            "compatibility": compatibility,
+            "support": compatibility.get("support"),
+            "session_dir": self.forsake_session_dir,
+        }
+        if not self.forsake_plan_output.toPlainText().strip():
+            self.forsake_plan_output.setPlainText(json.dumps(payload, indent=2, sort_keys=True))
+
     def pick_ipsw(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Choose IPSW", str(Path.home()), "IPSW firmware (*.ipsw);;All files (*)")
         if path:
@@ -1516,8 +2850,15 @@ class MainWindow(QMainWindow):
 
     def execute_signed_restore(self) -> None:
         if self.dry_only_toggle.isChecked():
-            QMessageBox.information(self, "iPS-UU", "Disable Dry-run only mode in Settings before executing a restore.")
-            return
+            override = QMessageBox.warning(
+                self,
+                "Override Dry-Run Mode",
+                "Dry-run only mode is enabled. Continue with a real signed firmware flash for this run only?",
+                QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Ok,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if override != QMessageBox.StandardButton.Ok:
+                return
         path = self.ipsw_path.text().strip()
         if not path or not Path(path).exists():
             QMessageBox.warning(self, "iPS-UU", "Choose a valid IPSW before executing a restore.")
@@ -1525,11 +2866,26 @@ class MainWindow(QMainWindow):
         action = self.restore_action_combo.currentText()
         backend = self.backend_combo.currentText()
         product = (self.device or {}).get("product_type")
+        try:
+            preflight = dry_run_plan(path, "auto", product, None, None, None, action, backend)
+        except Exception as exc:
+            QMessageBox.warning(self, "iPS-UU", f"Flash preflight failed: {exc}")
+            return
+        self.plan = preflight
+        self.plan_view.setPlainText(json_text(preflight))
+        selected_backend = (preflight.get("candidate_restore_backend") or {}).get("selected")
+        command = (preflight.get("candidate_restore_backend") or {}).get("command") or []
+        warnings = preflight.get("warnings") or []
+        if not command:
+            detail = "\n".join(str(item) for item in warnings) or "No supported restore backend command is available."
+            QMessageBox.warning(self, "iPS-UU", f"Cannot start firmware flash yet.\n\nBackend: {selected_backend or 'none'}\n{detail}")
+            return
         first = QMessageBox.warning(
             self,
-            "Confirm Restore",
-            "This will run a real signed firmware restore/update through the selected backend. "
-            "The device may be erased and backend validation failures are terminal.",
+            "Confirm Firmware Flash",
+            "This will force a real signed firmware restore/update attempt through the selected supported backend. "
+            "The device may be erased. Backend signing, nonce, SEP/baseband, activation, and compatibility failures are terminal.\n\n"
+            f"Command:\n{' '.join(str(part) for part in command)}",
             QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Ok,
             QMessageBox.StandardButton.Cancel,
         )
@@ -1538,7 +2894,7 @@ class MainWindow(QMainWindow):
         second = QMessageBox.warning(
             self,
             "Confirm Device Wipe Risk",
-            "Confirm you understand this may wipe data and iPS-UU will not bypass Apple signing, APTicket, nonce, SEP, or baseband validation.",
+            "Confirm you understand this may wipe data. iPS-UU will not bypass Apple signing, APTicket, nonce, SEP, or baseband validation, and it will not call private reverse-engineered restore APIs.",
             QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Ok,
             QMessageBox.StandardButton.Cancel,
         )
@@ -1551,11 +2907,11 @@ class MainWindow(QMainWindow):
                 ("IPSW parsed", "pending"),
                 ("Compatibility checked", "pending"),
                 ("Apple signing handled by backend", "pending"),
-                ("Restore command running", "pending"),
+                ("Signed flash command running", "pending"),
                 ("Backend result", "pending"),
             ]
         )
-        LOGGER.warning("starting signed restore backend=%s action=%s ipsw=%s", backend, action, path)
+        LOGGER.warning("starting forced signed flash backend=%s action=%s ipsw=%s", backend, action, path)
         self.start_worker("execute_restore", execute_restore, path, "auto", product, None, None, None, action, backend)
 
     def render_ios_device_viewer(self) -> None:
@@ -1567,7 +2923,10 @@ class MainWindow(QMainWindow):
             current_masked = current.data(Qt.ItemDataRole.UserRole)
         self.ios_device_list.clear()
         for device in devices:
-            label = f"{device.get('device_name') or 'iOS Device'} - {device.get('masked_udid') or 'unknown'}"
+            model = device.get("model_name") or device.get("product_type") or "iOS Device"
+            version = device.get("product_version") or "iOS unknown"
+            trust = device.get("pairing_status") or device.get("connection_status") or "Unknown"
+            label = f"{model} | {version} | {trust}"
             item = QListWidgetItem(label)
             item.setData(Qt.ItemDataRole.UserRole, device.get("masked_udid"))
             self.ios_device_list.addItem(item)
@@ -1588,6 +2947,8 @@ class MainWindow(QMainWindow):
         index = self.ios_device_list.currentRow()
         device = devices[index] if 0 <= index < len(devices) else None
         self.ios_device_visual.set_device(device)
+        if hasattr(self, "ios_device_header"):
+            self.ios_device_header.set_device(device)
         if not device:
             for label in ("No Device", "Disconnected"):
                 self.ios_status_badges.addWidget(pill(label, "neutral"))
@@ -1613,9 +2974,15 @@ class MainWindow(QMainWindow):
             ("UDID", device.get("masked_udid") or "Unknown", "Masked except last 6 characters in diagnostics."),
             ("Model ID", device.get("model_id") or "Unavailable", "ModelNumber/RegionInfo when available."),
             ("Product Type", device.get("product_type") or "Unknown", str(device.get("architecture") or "")),
+            ("Hardware Model", device.get("hardware_model") or "Unavailable", f"Board: {device.get('board_id') or 'unknown'}"),
+            ("Chip / Die", device.get("chip_id") or "Unavailable", f"Die: {device.get('die_id') or 'unknown'}"),
+            ("Device Class", device.get("device_class") or "Unavailable", str(device.get("cpu_architecture") or "")),
             ("Firmware Version", device.get("firmware_version") or device.get("product_version") or "Unknown", str(device.get("build_version") or "")),
+            ("Activation", device.get("activation_state") or "Unavailable", f"Baseband: {device.get('baseband_version') or 'n/a'}"),
             ("Device Storage", format_bytes(device.get("disk_capacity_bytes")), f"Free: {format_bytes(device.get('disk_free_bytes'))}"),
+            ("Battery", f"{device.get('battery_current_capacity')}%" if device.get("battery_current_capacity") is not None else "Unavailable", "Charging" if device.get("battery_is_charging") else ""),
             ("IMEI", device.get("imei") or "Unavailable", "Cellular devices only; requires trusted metadata access."),
+            ("Region / Color", device.get("region_info") or "Unavailable", f"{device.get('color') or ''} {device.get('enclosure_color') or ''}".strip()),
             ("Wi-Fi Address", device.get("wifi_address") or "Unavailable", "Requires trusted metadata access."),
             ("Bluetooth Address", device.get("bluetooth_address") or "Unavailable", "Requires trusted metadata access."),
             ("Connection Status", device.get("connection_status") or "Unknown", "USB/libimobiledevice detection."),
@@ -1630,11 +2997,16 @@ class MainWindow(QMainWindow):
 
     def render_device(self) -> None:
         clear_layout(self.device_grid)
+        if hasattr(self, "device_diagnostics_output"):
+            self.device_diagnostics_output.setPlainText(json.dumps((self.device or {}).get("diagnostics") or self.device or {}, indent=2, sort_keys=True))
+        if hasattr(self, "connected_device_header"):
+            self.connected_device_header.set_device(None, self.device)
         if not self.device or self.device.get("error"):
             self.device_empty.setText("No device detected")
             self.device_empty.show()
             detail = self.device.get("error") if self.device else "No device metadata available."
             self.device_grid.addWidget(Card("Detection", "Unavailable", str(detail)), 0, 0)
+            self.render_connected_device_verbose()
             return
         self.device_empty.hide()
         fields = [
@@ -1647,6 +3019,97 @@ class MainWindow(QMainWindow):
         ]
         for index, (label, value) in enumerate(fields):
             self.device_grid.addWidget(Card(label, str(value or "Unknown")), index // 2, index % 2)
+        self.render_connected_device_verbose()
+
+    def render_connected_device_verbose(self) -> None:
+        if not hasattr(self, "connected_verbose_grid"):
+            return
+        clear_layout(self.connected_verbose_grid)
+        devices = (self.device_viewer or {}).get("devices") or []
+        device = devices[0] if devices else None
+        if hasattr(self, "connected_device_visual"):
+            self.connected_device_visual.set_device(device)
+        if hasattr(self, "connected_device_header"):
+            self.connected_device_header.set_device(device, self.device)
+        self.render_connected_screen_preview()
+        if not device:
+            diagnosis = (self.device_viewer or {}).get("trust_diagnosis") or {}
+            usb = (self.device_viewer or {}).get("host_usb") or {}
+            self.connected_verbose_grid.addWidget(
+                Card("Device Detection", str(diagnosis.get("status") or "No device"), str(diagnosis.get("summary") or "Refresh Detailed Viewer after connecting and trusting the device.")),
+                0,
+                0,
+            )
+            self.connected_verbose_grid.addWidget(
+                Card("USB Host", "Apple device present" if usb.get("apple_mobile_device_present") else "No Apple USB device", "; ".join(str(item) for item in (usb.get("matched_lines") or [])) or "macOS did not report an iPhone/iPad/iPod on USB."),
+                0,
+                1,
+            )
+            self.connected_verbose_grid.addWidget(
+                Card("Next Steps", "Check cable/port/device", " ".join(str(item) for item in (diagnosis.get("next_steps") or []))),
+                0,
+                2,
+            )
+            return
+        fingerprint = device.get("fingerprint") or {}
+        identity = fingerprint.get("identity") or {}
+        hardware = fingerprint.get("hardware") or {}
+        firmware = fingerprint.get("firmware") or {}
+        radios = fingerprint.get("radios") or {}
+        storage = fingerprint.get("storage") or {}
+        battery = fingerprint.get("battery") or {}
+        tools = (self.device_viewer or {}).get("tools") or {}
+        diagnostics = (self.device_viewer or {}).get("diagnostics") or {}
+        domains = ", ".join(str(item) for item in (fingerprint.get("metadata_domains") or [])) or "Unavailable"
+        tool_summary = ", ".join(
+            f"{name}:{'yes' if item.get('present') else 'no'}"
+            for name, item in tools.items()
+        ) or "Unavailable"
+        rows = [
+            ("Trust Diagnosis", (self.device_viewer or {}).get("trust_diagnosis", {}).get("status") or "Unknown", (self.device_viewer or {}).get("trust_diagnosis", {}).get("summary") or ""),
+            ("Identity", identity.get("product_type") or device.get("product_type") or "Unknown", f"Model {identity.get('model_number') or device.get('model_id') or 'n/a'}, region {identity.get('region_info') or device.get('region_info') or 'n/a'}"),
+            ("Serial / UDID", identity.get("serial_number") or device.get("serial_number") or "Unavailable", f"UDID {device.get('masked_udid') or 'unknown'}"),
+            ("ECID", identity.get("ecid") or device.get("ecid") or "Unavailable", "UniqueChipID"),
+            ("Hardware", hardware.get("hardware_model") or device.get("hardware_model") or "Unavailable", f"Board {hardware.get('board_id') or device.get('board_id') or 'n/a'}"),
+            ("Chip", hardware.get("chip_id") or device.get("chip_id") or "Unavailable", f"Die {hardware.get('die_id') or device.get('die_id') or 'n/a'}"),
+            ("Class / CPU", hardware.get("device_class") or device.get("device_class") or "Unavailable", hardware.get("cpu_architecture") or device.get("cpu_architecture") or ""),
+            ("Color", hardware.get("device_color") or device.get("color") or "Unavailable", f"Enclosure {hardware.get('enclosure_color') or device.get('enclosure_color') or 'n/a'}"),
+            ("Firmware", firmware.get("product_version") or device.get("product_version") or "Unknown", f"Build {firmware.get('build_version') or device.get('build_version') or 'unknown'}"),
+            ("Activation", firmware.get("activation_state") or device.get("activation_state") or "Unavailable", "Activation state from lockdown metadata."),
+            ("Baseband", firmware.get("baseband_version") or device.get("baseband_version") or "Unavailable", f"Serial {firmware.get('baseband_serial_number') or device.get('baseband_serial_number') or 'n/a'}"),
+            ("IMEI / MEID", radios.get("imei") or device.get("imei") or "Unavailable", f"MEID {radios.get('meid') or 'n/a'}"),
+            ("Network IDs", radios.get("wifi_address") or device.get("wifi_address") or "Unavailable", f"Bluetooth {radios.get('bluetooth_address') or device.get('bluetooth_address') or 'n/a'}"),
+            ("Storage", format_bytes(storage.get("total_bytes") or device.get("disk_capacity_bytes")), f"Free {format_bytes(storage.get('free_bytes') or device.get('disk_free_bytes'))}"),
+            ("Battery", f"{battery.get('current_capacity')}%" if battery.get("current_capacity") is not None else "Unavailable", "Charging" if battery.get("is_charging") else "Not charging/unknown"),
+            ("Pairing / Lock", device.get("pairing_status") or "Unknown", device.get("lock_status") or ""),
+            ("Metadata Domains", domains, "Queried through ideviceinfo where available."),
+            ("Bundled Tools", tool_summary, "yes means detected from tools/ or PATH."),
+            ("Last Error", diagnostics.get("last_pairing_or_status_error") or "None", "Pairing/status diagnostics."),
+        ]
+        for index, (title, value, detail) in enumerate(rows):
+            self.connected_verbose_grid.addWidget(Card(title, str(value or "Unavailable"), str(detail or "")), index // 3, index % 3)
+
+    def render_connected_screen_preview(self) -> None:
+        if not hasattr(self, "connected_screen_preview"):
+            return
+        screen = (self.device_viewer or {}).get("screen") or {}
+        message = str(screen.get("message") or "Screen preview unavailable.")
+        path = screen.get("path")
+        if screen.get("available") and path and Path(str(path)).exists():
+            pixmap = QPixmap(str(path))
+            if not pixmap.isNull():
+                scaled = pixmap.scaled(
+                    self.connected_screen_preview.size(),
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+                self.connected_screen_preview.setPixmap(scaled)
+                self.connected_screen_preview.setText("")
+                self.connected_screen_status.setText(f"{message} {path}")
+                return
+        self.connected_screen_preview.setPixmap(QPixmap())
+        self.connected_screen_preview.setText(message)
+        self.connected_screen_status.setText(str(screen.get("policy") or "Preview uses idevicescreenshot when available."))
 
     def render_firmware(self) -> None:
         clear_layout(self.firmware_grid)
@@ -1741,6 +3204,9 @@ class MainWindow(QMainWindow):
     def render_turdus(self) -> None:
         clear_layout(self.tm_cards)
         clear_layout(self.tm_preflight_layout)
+        if hasattr(self, "tm_step_list"):
+            current_row = self.tm_step_list.currentRow()
+            self.tm_step_list.clear()
         toolchain = self.tm_toolchain or {}
         device = self.tm_device or {}
         ipsw = self.tm_ipsw or {}
@@ -1759,10 +3225,10 @@ class MainWindow(QMainWindow):
             Card("Toolchain", tool_state, permission_state),
             Card("Device", str(device.get("product_type") or "No device"), f"{chip}, mode {mode}"),
             Card("Firmware", firmware, compatibility),
-            Card("Workflow", self.tm_mode_combo.currentText(), "External prerequisite must already be complete before continuing."),
+            Card("Workflow", self.tm_mode_combo.currentText(), "Build the guide sequence, then run selected backend steps in Terminal."),
             Card("Artifacts", artifact_state, artifact_detail),
             Card("Activation Risk", "Warning" if ipsw.get("activation_baseband_warning") else "None detected", ipsw.get("activation_baseband_warning_text") or "No iOS 10 cellular A10X/iPhone 7 warning detected."),
-            Card("Execution", "Disabled", "iPS-UU does not launch pwnDFU, exploit, or Turdus Merula commands."),
+            Card("Execution", "Terminal step", "Selected guide commands are opened visibly in Terminal with full command previews."),
         ]
         for index, card in enumerate(cards):
             self.tm_cards.addWidget(card, index // 2, index % 2)
@@ -1785,6 +3251,19 @@ class MainWindow(QMainWindow):
             holder.setLayout(row)
             self.tm_preflight_layout.addWidget(holder)
 
+        if self.tm_guide_workflow is None:
+            try:
+                artifacts_for_workflow = {name: field.text().strip() or None for name, field in self.tm_artifact_paths.items()}
+                self.tm_guide_workflow = build_turdus_guide_workflow(self.tm_device or self.device or {}, self.tm_ipsw or {}, artifacts_for_workflow)
+            except Exception:
+                self.tm_guide_workflow = None
+        for step in (self.tm_guide_workflow or {}).get("steps", []):
+            item = QListWidgetItem(f"{step.get('title')} - {step.get('command_preview')}")
+            item.setData(Qt.ItemDataRole.UserRole, step)
+            self.tm_step_list.addItem(item)
+        if self.tm_step_list.count():
+            self.tm_step_list.setCurrentRow(current_row if 0 <= current_row < self.tm_step_list.count() else 0)
+
         output = {
             "toolchain": self.tm_toolchain,
             "device": self.tm_device,
@@ -1792,10 +3271,11 @@ class MainWindow(QMainWindow):
             "artifacts": self.tm_artifacts,
             "preflight": self.tm_preflight,
             "plan": self.tm_plan,
+            "guide_workflow": self.tm_guide_workflow,
             "session_dir": self.tm_session_dir,
         }
         self.tm_output.setPlainText(json.dumps(output, indent=2, sort_keys=True))
-        self.tm_execute_btn.setEnabled(False)
+        self.tm_execute_btn.setEnabled(bool(self.tm_step_list.count()))
 
     def render_external_tools(self) -> None:
         clear_layout(self.external_tools_grid)
@@ -1879,6 +3359,7 @@ class MainWindow(QMainWindow):
         blocked = self.contents_requirements.get("blocked_research_areas") or []
         requirements = self.contents_requirements.get("release_requirements") or []
         external = self.contents_requirements.get("external_tools") or []
+        findings = self.contents_requirements.get("restore_engine_findings") or []
         present_components = sum(1 for item in components if item.get("present"))
         required_names = ", ".join(
             str(item.get("name"))
@@ -1894,6 +3375,7 @@ class MainWindow(QMainWindow):
             Card("Bundled Components", f"{present_components}/{len(components)} present", "Local reverse-engineering inputs only."),
             Card("Safe Python Features", str(len(implemented)), "Implemented or inventory-only safe capabilities."),
             Card("Blocked Areas", str(len(blocked)), "Unsigned/offline/private restore behavior remains non-executable."),
+            Card("Restore Findings", str(len(findings)), "New rengineer findings are integrated as guardrails and documentation."),
             Card("Release Requirements", required_names or "None", "Core requirements kept in this release folder."),
             Card("External Tools", tool_state or "No tools found", "Optional backends and metadata helpers."),
         ]
@@ -1927,8 +3409,7 @@ class MainWindow(QMainWindow):
         if self.plan:
             backend = (self.plan.get("candidate_restore_backend") or {}).get("selected") or "unknown"
             warnings = len(self.plan.get("warnings") or [])
-            mode = "Execution enabled" if not self.dry_only_toggle.isChecked() else "Dry-run only"
-            self.card_dryrun.set(f"Backend: {backend}", f"{warnings} warning(s). {mode}.")
+            self.card_dryrun.set(f"Backend: {backend}", f"{warnings} warning(s). Signed flash button remains confirmation-gated.")
 
     def append_log(self, stamp: str, level: str, message: str) -> None:
         self.log_view.append(f"[{stamp}] [{level}] {message}")
@@ -1968,11 +3449,11 @@ class MainWindow(QMainWindow):
     def update_execution_controls(self) -> None:
         if hasattr(self, "execute_btn"):
             restore_running = any(worker.name == "execute_restore" for worker in self.active_workers)
-            self.execute_btn.setEnabled((not self.dry_only_toggle.isChecked()) and not restore_running)
+            self.execute_btn.setEnabled(not restore_running)
             self.execute_btn.setToolTip(
-                "Run a real signed restore/update through the selected backend."
-                if not self.dry_only_toggle.isChecked()
-                else "Disable Dry-run only mode in Settings before executing a restore."
+                "Restore is currently running."
+                if restore_running
+                else "Run a real signed firmware restore/update through the first usable supported backend after confirmations."
             )
 
     def apply_dependency_setup(self, payload: dict[str, Any]) -> None:
@@ -2013,6 +3494,12 @@ class MainWindow(QMainWindow):
             #Card {{ background: {panel}; border: 1px solid {border}; border-radius: 8px; }}
             #CardTitle {{ color: {muted}; font-size: 12px; font-weight: 700; text-transform: uppercase; }}
             #CardValue {{ color: {text}; font-size: 16px; font-weight: 700; }}
+            #DeviceHeader {{ background: {panel}; border: 1px solid {border}; border-radius: 8px; }}
+            #DeviceHeaderTitle {{ color: {text}; font-size: 20px; font-weight: 800; }}
+            #MetricBlock {{ background: {bg}; border: 1px solid {border}; border-radius: 6px; }}
+            #MetricLabel {{ color: {muted}; font-size: 11px; font-weight: 700; text-transform: uppercase; }}
+            #MetricValue {{ color: {text}; font-size: 13px; font-weight: 700; }}
+            #SimulationBanner {{ background: #fef3c7; color: #713f12; border: 1px solid #f59e0b; border-radius: 8px; padding: 12px; font-weight: 800; }}
             #Navigation {{ background: transparent; border: none; color: #cbd5e1; outline: 0; }}
             #Navigation::item {{ padding: 10px 10px; border-radius: 6px; }}
             #Navigation::item:selected {{ background: #334155; color: #ffffff; }}

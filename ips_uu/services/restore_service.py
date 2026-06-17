@@ -7,6 +7,7 @@ import subprocess
 from typing import Any
 
 from ips_uu.restore_research import RestoreResearchError, build_plan, enforce_execution_guardrails, inventory
+from ips_uu.services.mock_tss_service import validate_command_has_no_mock_ticket
 
 
 def backend_inventory() -> dict[str, Any]:
@@ -74,6 +75,7 @@ def execute_restore(
     command = plan["candidate_restore_backend"]["command"]
     if not command:
         raise RestoreResearchError("no restore backend command is available")
+    validate_command_has_no_mock_ticket(command)
     completed = subprocess.run(command, check=False, capture_output=True, text=True)
     return {
         "plan": plan,

@@ -60,6 +60,18 @@ def test_device_connected_and_paired() -> None:
                     "product_type": "iPhone10,3",
                     "product_version": "16.7.8",
                     "build_version": "20H343",
+                    "hardware_model": "D221AP",
+                    "board_id": "4",
+                    "chip_id": "32768",
+                    "die_id": "123",
+                    "activation_state": "Activated",
+                    "baseband_version": "8.02.01",
+                    "device_class": "iPhone",
+                    "cpu_architecture": "arm64",
+                    "region_info": "LL/A",
+                    "battery_current_capacity": 88,
+                    "battery_is_charging": True,
+                    "fingerprint": {"identity": {"product_type": "iPhone10,3"}},
                     "serial_number": "C39TEST",
                     "logic_number": "MLBTEST",
                     "logic_board": "D221AP",
@@ -84,6 +96,18 @@ def test_device_connected_and_paired() -> None:
     assert device["ecid"] == "123456"
     assert device["model_id"] == "MQA52"
     assert device["firmware_version"] == "16.7.8"
+    assert device["hardware_model"] == "D221AP"
+    assert device["board_id"] == "4"
+    assert device["chip_id"] == "32768"
+    assert device["die_id"] == "123"
+    assert device["activation_state"] == "Activated"
+    assert device["baseband_version"] == "8.02.01"
+    assert device["device_class"] == "iPhone"
+    assert device["cpu_architecture"] == "arm64"
+    assert device["region_info"] == "LL/A"
+    assert device["battery_current_capacity"] == 88
+    assert device["battery_is_charging"] is True
+    assert device["fingerprint"]["identity"]["product_type"] == "iPhone10,3"
     assert device["imei"] == "359000000000000"
     assert device["wifi_address"] == "00:11:22:33:44:55"
     assert device["bluetooth_address"] == "66:77:88:99:AA:BB"
@@ -151,3 +175,51 @@ def test_perform_device_action_restart_uses_public_tool(monkeypatch) -> None:
     assert result["succeeded"] is True
     assert result["command"] == ["/usr/bin/idevicediagnostics", "-u", "00008110abcdef", "restart"]
     assert result["safety"]["restore_or_jailbreak"] is False
+
+
+def test_screen_provider_reports_missing_screenshot_tool(monkeypatch) -> None:
+    monkeypatch.setattr(viewer, "resolve_tool", lambda _name: None)
+    result = viewer.LibimobiledeviceScreenProvider().screen_status("00008110abcdef")
+    assert result["available"] is False
+    assert "idevicescreenshot" in result["message"]
+
+
+def test_trust_diagnosis_reports_not_physically_detected() -> None:
+    diagnosis = viewer.trust_diagnosis(
+        {"devices": []},
+        [],
+        {"available": True, "apple_mobile_device_present": False, "matched_lines": []},
+    )
+    assert diagnosis["status"] == "not_physically_detected"
+    assert "not a trust-prompt failure" in diagnosis["summary"]
+
+
+def test_trust_diagnosis_reports_connected_not_trusted() -> None:
+    record = viewer.DeviceRecord(udid="abc", pairing_status="Needs Trust", badges=["Connected", "Needs Trust"])
+    diagnosis = viewer.trust_diagnosis({"devices": ["abc"]}, [record], {"available": True, "apple_mobile_device_present": True})
+    assert diagnosis["status"] == "connected_not_trusted"
+
+
+def test_device_fingerprint_collects_verbose_fields() -> None:
+    info = {
+        "ProductType": "iPhone10,3",
+        "ModelNumber": "MQA52",
+        "RegionInfo": "LL/A",
+        "SerialNumber": "C39TEST",
+        "UniqueDeviceID": "00008110abcdef",
+        "UniqueChipID": "123456",
+        "HardwareModel": "D221AP",
+        "BoardId": 4,
+        "ChipID": 32768,
+        "DieID": 123,
+        "ProductVersion": "16.7.8",
+        "BuildVersion": "20H343",
+        "ActivationState": "Activated",
+        "BasebandVersion": "8.02.01",
+        "WiFiAddress": "00:11:22:33:44:55",
+    }
+    fingerprint = viewer.device_fingerprint(info, {"com.apple.mobile.battery": {"BatteryCurrentCapacity": 91}})
+    assert fingerprint["identity"]["product_type"] == "iPhone10,3"
+    assert fingerprint["hardware"]["hardware_model"] == "D221AP"
+    assert fingerprint["firmware"]["baseband_version"] == "8.02.01"
+    assert fingerprint["battery"]["current_capacity"] == 91

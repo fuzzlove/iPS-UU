@@ -1,0 +1,60 @@
+{
+  "devices": {
+    "iPhone8,1": {
+      "marketing_name": "iPhone 6s",
+      "chip_family": "A9",
+      "board_config": "n71ap",
+      "supported_backend_categories": ["normal_restore_supported", "recovery_restore_supported", "dfu_detectable", "checkm8_class", "a9_a10_a10x_class", "forsake_candidate_if_supported_by_backend"],
+      "notes": "Verify exact Forsake support from bundled Forsake docs/help/source."
+    },
+    "iPhone8,2": {
+      "marketing_name": "iPhone 6s Plus",
+      "chip_family": "A9",
+      "board_config": "n66ap",
+      "supported_backend_categories": ["normal_restore_supported", "recovery_restore_supported", "dfu_detectable", "checkm8_class", "a9_a10_a10x_class", "forsake_candidate_if_supported_by_backend"],
+      "notes": "Verify exact Forsake support from bundled Forsake docs/help/source."
+    },
+    "iPhone8,4": {
+      "marketing_name": "iPhone SE (1st generation)",
+      "chip_family": "A9",
+      "board_config": "n69ap",
+      "supported_backend_categories": ["normal_restore_supported", "recovery_restore_supported", "dfu_detectable", "checkm8_class", "a9_a10_a10x_class", "forsake_candidate_if_supported_by_backend"],
+      "notes": "Verify exact Forsake support from bundled Forsake docs/help/source."
+    },
+    "iPhone9,1": {
+      "marketing_name": "iPhone 7",
+      "chip_family": "A10",
+      "board_config": "d10ap",
+      "supported_backend_categories": ["normal_restore_supported", "recovery_restore_supported", "dfu_detectable", "checkm8_class", "a9_a10_a10x_class", "forsake_candidate_if_supported_by_backend"],
+      "notes": "SEP/baseband/activation constraints must be verified for target firmware."
+    },
+    "iPhone9,2": {
+      "marketing_name": "iPhone 7 Plus",
+      "chip_family": "A10",
+      "board_config": "d11ap",
+      "supported_backend_categories": ["normal_restore_supported", "recovery_restore_supported", "dfu_detectable", "checkm8_class", "a9_a10_a10x_class", "forsake_candidate_if_supported_by_backend"],
+      "notes": "SEP/baseband/activation constraints must be verified for target firmware."
+    },
+    "iPhone10,3": {
+      "marketing_name": "iPhone X",
+      "chip_family": "A11",
+      "board_config": "d22ap",
+      "supported_backend_categories": ["normal_restore_supported", "recovery_restore_supported", "dfu_detectable", "checkm8_class"],
+      "notes": "A11 workflows often have SEP/passcode caveats; verify backend support manually."
+    },
+    "iPad7,1": {
+      "marketing_name": "iPad Pro 12.9-inch (2nd generation)",
+      "chip_family": "A10X",
+      "board_config": "j120ap",
+      "supported_backend_categories": ["normal_restore_supported", "recovery_restore_supported", "dfu_detectable", "checkm8_class", "a9_a10_a10x_class", "forsake_candidate_if_supported_by_backend"],
+      "notes": "Verify exact Forsake support from bundled Forsake docs/help/source."
+    },
+    "iPad7,4": {
+      "marketing_name": "iPad Pro 10.5-inch",
+      "chip_family": "A10X",
+      "board_config": "j207ap",
+      "supported_backend_categories": ["normal_restore_supported", "recovery_restore_supported", "dfu_detectable", "checkm8_class", "a9_a10_a10x_class", "forsake_candidate_if_supported_by_backend"],
+      "notes": "Verify exact Forsake support from bundled Forsake docs/help/source."
+    }
+  }
+}
