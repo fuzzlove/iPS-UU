@@ -32,20 +32,32 @@ The GUI includes Dashboard, Connected Device, Firmware / IPSW, Restore Options, 
 
 The sidebar motto is `Professional IPSW matters.`
 
-### Screenshots
+Screenshots:
 
-Placeholders for first release screenshots:
+## Dashboard
+<img width="2696" height="1774" alt="image" src="https://github.com/user-attachments/assets/e4fef062-62bc-4c92-9421-708ff214deec" />
 
-- `docs/screenshots/dashboard.png`
-- `docs/screenshots/connected-device.png`
-- `docs/screenshots/firmware-ipsw.png`
-- `docs/screenshots/restore-options.png`
-- `docs/screenshots/restore.png`
-- `docs/screenshots/signing-simulator.png`
-- `docs/screenshots/downgrade.png`
-- `docs/screenshots/apps-install.png`
-- `docs/screenshots/tools.png`
-- `docs/screenshots/logs.png`
+## Connected Device
+<img width="2692" height="1724" alt="image" src="https://github.com/user-attachments/assets/bf2338fe-8ad0-4dff-871a-0b2b5967b2b3" />
+
+## Firmware / IPSW
+<img width="2722" height="1786" alt="image" src="https://github.com/user-attachments/assets/76902aa8-66e1-4221-99b4-817d59f1dfc6" />
+
+## Restore Options
+<img width="2732" height="1794" alt="image" src="https://github.com/user-attachments/assets/376afbc4-72fa-47c2-8437-a069a2797591" />
+
+## Restore
+<img width="2740" height="1788" alt="image" src="https://github.com/user-attachments/assets/cbe3fe34-e959-4b09-8cb8-ab0ecc7fdbcc" />
+
+## Signing Simulator
+<img width="2730" height="1760" alt="image" src="https://github.com/user-attachments/assets/099eaa37-dec6-4398-a5e4-7184a4c38598" />
+
+## Purple Restore
+<img width="2726" height="1752" alt="image" src="https://github.com/user-attachments/assets/2a00f7e6-a8ca-4f68-a052-c58c1a4e1363" />
+
+## Apps Install
+<img width="2728" height="1750" alt="image" src="https://github.com/user-attachments/assets/c2020912-83cd-496b-81a6-aa0f34d9f7bc" />
+
 
 ## CLI
 
