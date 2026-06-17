@@ -78,7 +78,7 @@ exe = EXE(
     icon="assets/icons/ips-uu.icns",
     disable_windowed_traceback=False,
     argv_emulation=True,
-    target_arch=None,
+    target_arch="universal2",
     codesign_identity=None,
     entitlements_file=None,
 )
@@ -97,5 +97,5 @@ app = BUNDLE(
     name="iPS-UU.app",
     icon="assets/icons/ips-uu.icns",
     bundle_identifier="org.ipsuu.restore-research",
-    version="0.1.1",
+    version="0.1.2",
 )
