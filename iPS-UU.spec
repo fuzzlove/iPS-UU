@@ -51,6 +51,7 @@ a = Analysis(
         ("assets/icons/ips-uu.icns", "assets/icons"),
         ("assets/icons/ips-uu.ico", "assets/icons"),
         ("assets/icons/png/ips-uu-icon-main-1024.png", "assets/icons/png"),
+        ("assets/support/donation-qr.png", "assets/support"),
     ] + optional_datas,
     hiddenimports=collect_submodules("ips_uu"),
     hookspath=[],
@@ -96,4 +97,5 @@ app = BUNDLE(
     name="iPS-UU.app",
     icon="assets/icons/ips-uu.icns",
     bundle_identifier="org.ipsuu.restore-research",
+    version="0.1.1",
 )

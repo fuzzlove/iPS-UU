@@ -94,6 +94,10 @@ def app_icon() -> QIcon:
     return icon
 
 
+def asset_path(*parts: str) -> Path:
+    return app_root().joinpath(*parts)
+
+
 class LogEmitter(QObject):
     message = Signal(str, str, str)
 
@@ -1764,6 +1768,56 @@ class MainWindow(QMainWindow):
             """
         )
         layout.addWidget(about)
+
+        support = QFrame()
+        support.setObjectName("Panel")
+        support_layout = QHBoxLayout(support)
+        support_layout.setContentsMargins(18, 16, 18, 16)
+        support_layout.setSpacing(18)
+
+        copy = QVBoxLayout()
+        support_url = "https://www.patreon.com/cw/fuzzlove"
+        title = QLabel(f'<a href="{support_url}">Support Continued Development</a>')
+        title.setObjectName("CardValue")
+        title.setOpenExternalLinks(True)
+        text = QLabel(
+            f'<a href="{support_url}">'
+            "iPS-UU is developed as an independent device servicing and research workspace. "
+            "Donations help fund testing hardware, release packaging, documentation, and ongoing maintenance."
+            "</a>"
+        )
+        text.setObjectName("Muted")
+        text.setWordWrap(True)
+        text.setOpenExternalLinks(True)
+        note = QLabel(f'<a href="{support_url}">Optional support only. The app remains usable without a donation.</a>')
+        note.setObjectName("Muted")
+        note.setWordWrap(True)
+        note.setOpenExternalLinks(True)
+        copy.addWidget(title)
+        copy.addWidget(text)
+        copy.addWidget(note)
+        copy.addStretch(1)
+
+        qr = QLabel("Donation QR")
+        qr.setObjectName("DonationQR")
+        qr.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        qr.setFixedSize(132, 132)
+        qr_path = asset_path("assets", "support", "donation-qr.png")
+        if qr_path.exists():
+            pixmap = QPixmap(str(qr_path))
+            if not pixmap.isNull():
+                qr.setPixmap(
+                    pixmap.scaled(
+                        120,
+                        120,
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation,
+                    )
+                )
+                qr.setText("")
+        support_layout.addLayout(copy, 1)
+        support_layout.addWidget(qr)
+        layout.addWidget(support)
         return page
 
     def load_initial_state(self) -> None:
@@ -3500,6 +3554,7 @@ class MainWindow(QMainWindow):
             #MetricLabel {{ color: {muted}; font-size: 11px; font-weight: 700; text-transform: uppercase; }}
             #MetricValue {{ color: {text}; font-size: 13px; font-weight: 700; }}
             #SimulationBanner {{ background: #fef3c7; color: #713f12; border: 1px solid #f59e0b; border-radius: 8px; padding: 12px; font-weight: 800; }}
+            #DonationQR {{ background: #ffffff; border: 1px solid {border}; border-radius: 8px; padding: 6px; color: {muted}; }}
             #Navigation {{ background: transparent; border: none; color: #cbd5e1; outline: 0; }}
             #Navigation::item {{ padding: 10px 10px; border-radius: 6px; }}
             #Navigation::item:selected {{ background: #334155; color: #ffffff; }}

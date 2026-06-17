@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added a tasteful About-page support panel with a local donation QR code and clickable Patreon support links.
 - Reworked device identification with multi-backend normal/recovery/DFU detection, USB fallback matching, normalized identity fields, command diagnostics, and recommended fixes.
 - Added `data/ios_device_map.json` for known ProductType marketing/chip/backend-category metadata with explicit manual-verification fallback.
 - Removed Forsake as a first-class release workflow so the app can focus on firmware flashing, recovery, device statistics, and signed restore analysis.

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ips-uu"
-version = "0.1.0"
+version = "0.1.1"
 description = "iPS-UU IPSW inspection and signed restore utility framework"
 requires-python = ">=3.10"
 readme = "README.md"
