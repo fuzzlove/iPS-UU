@@ -1,4 +1,6 @@
-# iPS-UU
+# iPS-UU 
+
+`Professional IPSW matters.`
 
 iPS-UU is a professional device servicing and research interface for iOS restore, recovery, signed downgrade analysis, app install, firmware inspection, and detailed device statistics.
 
@@ -30,7 +32,6 @@ python3 -m ips_uu gui
 
 The GUI includes Dashboard, Connected Device, Firmware / IPSW, Restore Options, Restore, Signing Simulator, Purple Restore, Downgrade, Apps / Install, Logs, Tools, Settings, and About views. The Restore tab exposes a confirmation-gated `Force Signed Flash` action that first builds a backend command plan, shows the exact command or blocker, and then runs only supported signed restore backends.
 
-The sidebar motto is `Professional IPSW matters.`
 
 Screenshots:
 
