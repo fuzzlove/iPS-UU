@@ -1,6 +1,8 @@
-# iPS-UU 
+# iPS-UU (Pronounced: IP-SUE)
 
 `Professional IPSW matters.`
+
+'This project was made for a community that believes in each other and to help those that may have been a victim to fraud. By scams that claim they can downgrade without any evidence or proof. The Apple iOS community seems to be getting better at getting these tools off the market. This is simply a proof-of-concept that shows Tatsu is working correctly as far as I can see for this testing period. Everything has been reported directly to Apple. The tool simply will help you understand the downgrading and upgrading process in a possibly more visible way than whats been available.'
 
 iPS-UU is a professional device servicing and research interface for iOS restore, recovery, signed downgrade analysis, app install, firmware inspection, and detailed device statistics.
 
